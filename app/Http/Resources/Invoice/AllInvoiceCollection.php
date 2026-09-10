@@ -37,9 +37,9 @@ class AllInvoiceCollection extends ResourceCollection
         return [
             "result" => [
                 'invoices' => AllInvoiceResource::collection(($this->collection)->values()->all()),
+                'totals' => $this->totals,
             ],
             'pagination' => $this->pagination,
-            'totals' => $this->totals,
         ];
 
     }

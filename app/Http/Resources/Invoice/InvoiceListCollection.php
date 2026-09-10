@@ -29,9 +29,9 @@ class InvoiceListCollection extends ResourceCollection
         return [
             'result' => [
                 'invoices' => $this->collection->values()->all(),
+                'totals' => $this->totals,
             ],
             'pagination' => $this->pagination,
-            'totals' => $this->totals,
         ];
     }
 }

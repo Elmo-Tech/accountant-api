@@ -77,15 +77,15 @@ class InvoiceConsistencyTest extends TestCase
             ->assertJsonPath('result.invoices.0.taxableAmount', 200)
             ->assertJsonPath('result.invoices.0.ivaAmount', 44)
             ->assertJsonPath('pagination.total', 3)
-            ->assertJsonPath('totals.taxableAmount', 600)
-            ->assertJsonPath('totals.ivaAmount', 132)
-            ->assertJsonPath('totals.totalAmount', 732);
+            ->assertJsonPath('result.totals.taxableAmount', 600)
+            ->assertJsonPath('result.totals.ivaAmount', 132)
+            ->assertJsonPath('result.totals.totalAmount', 732);
         $this->getJson('/api/v1/invoices?filter[unassigned]=0&pageSize=1&page=2')
             ->assertOk()->assertJsonPath('result.invoices.0.invoiceId', 1)
-            ->assertJsonPath('totals.totalAmount', 732);
+            ->assertJsonPath('result.totals.totalAmount', 732);
         $this->getJson('/api/v1/invoices?filter[unassigned]=0&pageSize=1&page=10')
             ->assertOk()->assertJsonCount(0, 'result.invoices')
-            ->assertJsonPath('totals.totalAmount', 732);
+            ->assertJsonPath('result.totals.totalAmount', 732);
     }
 
     public function test_date_filter_keeps_all_invoice_lines_and_ignores_deleted_lines(): void
@@ -100,7 +100,7 @@ class InvoiceConsistencyTest extends TestCase
             ->assertOk()->assertJsonCount(2, 'result.invoices.0.tasks')
             ->assertJsonPath('result.invoices.0.taxableAmount', 150)
             ->assertJsonPath('result.invoices.0.ivaAmount', 33)
-            ->assertJsonPath('totals.totalAmount', 183)
+            ->assertJsonPath('result.totals.totalAmount', 183)
             ->assertJsonPath('result.invoices.0.invoiceDate', '2026-02-01');
         $document = app(InvoiceDocumentService::class)->build($invoice);
         $this->assertSame(150.0, $document['invoiceTaxableTotal']);
@@ -115,11 +115,11 @@ class InvoiceConsistencyTest extends TestCase
         }
         $this->getJson('/api/v1/invoices?filter[unassigned]=0&sortXmlNumber=asc&pageSize=1')
             ->assertOk()->assertJsonPath('result.invoices.0.invoiceId', 1)
-            ->assertJsonPath('totals.totalAmount', 366);
+            ->assertJsonPath('result.totals.totalAmount', 366);
         foreach ([1 => 2, 2 => 1, 3 => 3] as $page => $id) {
             $this->getJson('/api/v1/invoices?filter[unassigned]=0&sortXmlNumber=desc&pageSize=1&page='.$page)
                 ->assertOk()->assertJsonPath('result.invoices.0.invoiceId', $id)
-                ->assertJsonPath('totals.totalAmount', 366);
+                ->assertJsonPath('result.totals.totalAmount', 366);
         }
         $this->getJson('/api/v1/invoices?filter[unassigned]=0&sortXmlNumber=invalid')
             ->assertUnprocessable()->assertJsonValidationErrors('sortXmlNumber');
@@ -291,16 +291,16 @@ class InvoiceConsistencyTest extends TestCase
         foreach ([1, 2] as $page) {
             $this->getJson('/api/v1/invoice-income-items?type=1&clientId=1&startDate=2026-02-01&endDate=2026-02-28&pageSize=1&page='.$page)
                 ->assertOk()->assertJsonCount(1, 'result.invoices')
-                ->assertJsonPath('totals.taxableAmount', 300)
-                ->assertJsonPath('totals.ivaAmount', 66)
-                ->assertJsonPath('totals.totalAmount', 366);
+                ->assertJsonPath('result.totals.taxableAmount', 300)
+                ->assertJsonPath('result.totals.ivaAmount', 66)
+                ->assertJsonPath('result.totals.totalAmount', 366);
         }
         $this->getJson('/api/v1/invoice-income-items?type=2&clientId=1&year=2026&pageSize=1')
             ->assertOk()->assertJsonPath('pagination.total', 1)
-            ->assertJsonPath('totals.totalAmount', 366);
+            ->assertJsonPath('result.totals.totalAmount', 366);
         $this->getJson('/api/v1/invoice-income-items?type=0&clientId=1&year=2026&pageSize=1')
             ->assertOk()->assertJsonPath('pagination.total', 4)
-            ->assertJsonPath('totals.totalAmount', 1220);
+            ->assertJsonPath('result.totals.totalAmount', 1220);
         $this->travelBack();
     }
 
@@ -314,9 +314,9 @@ class InvoiceConsistencyTest extends TestCase
             '/api/v1/invoice-income-items?type=1',
         ] as $url) {
             $this->getJson($url)->assertOk()->assertJsonCount(0, 'result.invoices')
-                ->assertJsonPath('totals.taxableAmount', 0)
-                ->assertJsonPath('totals.ivaAmount', 0)
-                ->assertJsonPath('totals.totalAmount', 0);
+                ->assertJsonPath('result.totals.taxableAmount', 0)
+                ->assertJsonPath('result.totals.ivaAmount', 0)
+                ->assertJsonPath('result.totals.totalAmount', 0);
         }
     }
 
@@ -334,11 +334,11 @@ class InvoiceConsistencyTest extends TestCase
             $this->getJson('/api/v1/invoices?filter[unassigned]=1&pageSize=1&page='.$page)
                 ->assertOk()->assertJsonCount(1, 'result.invoices')
                 ->assertJsonPath('pagination.total', 2)
-                ->assertJsonPath('totals.taxableAmount', 200)
-                ->assertJsonPath('totals.ivaAmount', 44)
-                ->assertJsonPath('totals.totalAmount', 244);
+                ->assertJsonPath('result.totals.taxableAmount', 200)
+                ->assertJsonPath('result.totals.ivaAmount', 44)
+                ->assertJsonPath('result.totals.totalAmount', 244);
         }
         $this->getJson('/api/v1/invoices?filter[unassigned]=1&filter[clientId]=1')
-            ->assertOk()->assertJsonPath('totals.totalAmount', 122);
+            ->assertOk()->assertJsonPath('result.totals.totalAmount', 122);
     }
 }

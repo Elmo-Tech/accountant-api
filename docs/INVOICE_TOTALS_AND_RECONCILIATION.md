@@ -39,8 +39,8 @@ calculation.
 
 ### Filtered table totals (item 7)
 
-Both existing list endpoints now return a top-level `totals` object, alongside
-`result` and `pagination`. No additional request parameters or endpoint are needed:
+Both existing list endpoints return `totals` inside `result`, alongside
+`invoices`. `pagination` remains at the top level. No additional request parameters or endpoint are needed:
 
 - `GET /api/v1/invoices`: assigned invoices (`filter[unassigned]=0`, the default)
   and unassigned client previews (`filter[unassigned]=1`).
@@ -49,18 +49,21 @@ Both existing list endpoints now return a top-level `totals` object, alongside
 
 ```json
 {
-  "totals": {
-    "taxableAmount": 300,
-    "ivaAmount": 66,
-    "totalAmount": 366
+  "result": {
+    "invoices": [],
+    "totals": {
+      "taxableAmount": 300,
+      "ivaAmount": 66,
+      "totalAmount": 366
+    }
   }
 }
 ```
 
-- `totals.taxableAmount`: sum of taxable amounts of all matching rows.
-- `totals.ivaAmount`: sum of their individually rounded IVA amounts (a monetary
+- `result.totals.taxableAmount`: sum of taxable amounts of all matching rows.
+- `result.totals.ivaAmount`: sum of their individually rounded IVA amounts (a monetary
   value, not the rate). IVA is not recalculated on the combined base.
-- `totals.totalAmount`: sum of final amounts including excluded expenses and
+- `result.totals.totalAmount`: sum of final amounts including excluded expenses and
   any stamp. Uses `totalInvoiceAfterDiscount` on the main list and `total` on
   the income list.
 
