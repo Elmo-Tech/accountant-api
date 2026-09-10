@@ -35,6 +35,7 @@ class InvoiceListByStatusController extends Controller
             $dateColumn = $key === 1 ? 'invoices.pay_date' : 'invoices.end_at';
 
             $invoices = Invoice::with(['client', 'invoiceDetails'])
+                ->whereHas('client')->whereHas('invoiceDetails')
                 ->whereNull('invoices.deleted_at')
                 ->when($key === 1, fn($q) => $q->where('pay_status', 1))
                 ->when($key === 2, fn($q) => $q->where('pay_status', 0)
@@ -46,41 +47,31 @@ class InvoiceListByStatusController extends Controller
                 ->when($request->filled('clientId'),  fn($q) => $q->where('invoices.client_id', $request->clientId))
                 ->get();
 
+            $invoices = app(\App\Services\Invoice\InvoiceListService::class)->ordered($invoices);
             $data = $invoices->map(function ($invoice) use ($key) {
                 $date = $key === 1
                     ? $invoice->pay_date
                     : $invoice->end_at;
 
-                // calc total same as InvoiceController
-                $subtotal = $invoice->invoiceDetails->sum('price_after_discount');
-                $subtotal = $subtotal + ($subtotal * 0.22);
-
-                if ($invoice->client && $invoice->client->total_tax > 0) {
-                    $subtotal = $subtotal + ($subtotal * ($invoice->client->total_tax / 100));
-                }
-
-                if ($invoice->discount_amount > 0) {
-                    if ($invoice->discount_type == 0) {
-                        $subtotal -= $invoice->discount_amount;
-                    } elseif ($invoice->discount_type == 1) {
-                        $subtotal -= $subtotal * ($invoice->discount_amount / 100);
-                    }
-                }
+                $amounts = app(\App\Services\Invoice\InvoiceTotalsService::class)->forInvoice($invoice);
 
                 return [
                     'invoiceId'     => $invoice->id,
                     'invoiceNumber' => $invoice->number ?? '',
                     'clientName'    => $invoice->client->ragione_sociale ?? '',
                     'date'          => $date,
-                    'total'         => round($subtotal, 2),
+                    'total'         => $amounts['total'],
+                    'taxableAmount' => $amounts['taxableAmount'],
+                    'ivaAmount' => $amounts['ivaAmount'],
                     'payStatus'     => $invoice->pay_status,
                 ];
             });
 
+            $totals = app(\App\Services\Invoice\InvoiceTotalsService::class)->summarize($data, 'total');
             $pageSize = $request->pageSize ?? 10;
             $paginated = PaginateCollection::paginate(collect($data), $pageSize);
 
-            return response()->json(new InvoiceListCollection($paginated), 200);
+            return response()->json(new InvoiceListCollection($paginated, $totals), 200);
 
         } catch (\Exception $e) {
             return response()->json(['message' => $e->getMessage()], 500);

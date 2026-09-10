@@ -45,9 +45,9 @@ class InvoiceController extends Controller
 
     public function index(Request $request)
     {
-        $filters = $request->filter ?? null;
+        $filters = $request->filter ?? [];
 
-        if($filters['unassigned'] == 0){
+        if (($filters['unassigned'] ?? 0) == 0) {
             return $this->assignedInvoices($request);
         }
 
@@ -82,6 +82,7 @@ class InvoiceController extends Controller
                 'invoices.created_at as invoiceCreatedAt',
                 'clients.id as clientId',
                 'clients.total_tax as clientTotalTax',
+                'clients.limit_decreto as clientTaxLimit',
                 'clients.ragione_sociale as clientName',
                 'clients.addable_to_bulk_invoice as clientAddableToBulkInvoice',
                 'invoices.number as invoiceNumber',
@@ -148,6 +149,7 @@ class InvoiceController extends Controller
                     'invoiceDiscountType' => $invoice->invoiceDiscountType,
                     'invoiceDiscountAmount' => $invoice->invoiceDiscountAmount,
                     'clientTotalTax' => $invoice->clientTotalTax,
+                    'clientTaxLimit' => $invoice->clientTaxLimit,
                     'invoiceDiscount' => 0,
                     'totalInvoiceAfterDiscount' => 0
                 ];
@@ -217,44 +219,29 @@ class InvoiceController extends Controller
             ];
 
 
-            if(count($formattedData) > 0) {
-                $formattedData[$search]['additionalTax'] = $formattedData[$search]['clientTotalTax'];
-                $formattedData[$search]['totalAfterAdditionalTax'] = $formattedData[$search]['totalPriceAfterDiscount'];
-
-                $formattedData[$search]['invoiceDiscount'] = 0 ;
-                $formattedData[$search]['totalInvoiceAfterDiscount'] = $formattedData[$search]['totalAfterAdditionalTax'];
-
-
-                if($formattedData[$search]['additionalTax'] > 0) {
-                    $formattedData[$search]['totalAfterAdditionalTax'] = $formattedData[$search]['totalAfterAdditionalTax'] + ($formattedData[$search]['totalAfterAdditionalTax'] * ($formattedData[$search]['additionalTax'] / 100));
-                }
-
-                //$formattedData[$search]['totalAfterAdditionalTax'] += $formattedData[$search]['totalCosts'];
-
-                if($invoice->invoiceDiscountType == 0) {
-                    $formattedData[$search]['invoiceDiscount'] = $invoice->invoiceDiscountAmount;
-                    $formattedData[$search]['totalInvoiceAfterDiscount'] = ($formattedData[$search]['totalAfterAdditionalTax'] - $invoice->invoiceDiscountAmount);
-                }
-
-                if($invoice->invoiceDiscountType == 1) {
-                    $formattedData[$search]['invoiceDiscount'] = $invoice->invoiceDiscountAmount;
-                    $formattedData[$search]['totalInvoiceAfterDiscount'] = ($formattedData[$search]['totalAfterAdditionalTax'] - ($formattedData[$search]['totalAfterAdditionalTax'] * ($invoice->invoiceDiscountAmount / 100)));
-                }
-
-
-
-            }
-
-
-
-
         }
 
+        $calculator = app(\App\Services\Invoice\InvoiceTotalsService::class);
+        foreach ($formattedData as &$row) {
+            $amounts = $calculator->calculate(
+                $row['totalPriceAfterDiscount'], $row['totalCosts'],
+                $row['clientTotalTax'] ?? 0, $row['clientTaxLimit'] ?? 0,
+                $row['invoiceDiscountType'], $row['invoiceDiscountAmount'] ?? 0,
+            );
+            $row['additionalTax'] = $row['clientTotalTax'];
+            $row['totalAfterAdditionalTax'] = $amounts['totalBeforeDiscount'];
+            $row['totalInvoiceAfterDiscount'] = $amounts['total'];
+            $row['taxableAmount'] = $amounts['taxableAmount'];
+            $row['ivaAmount'] = $amounts['ivaAmount'];
+        }
+        unset($row);
+
         // Paginate the formatted data
+        $totals = $calculator->summarize($formattedData, 'totalInvoiceAfterDiscount');
         $pageSize = $request->pageSize ?? 10;
         $paginatedData = PaginateCollection::paginate(collect($formattedData), $pageSize);
 
-        return response()->json(new AllInvoiceCollection($paginatedData), 200);
+        return response()->json(new AllInvoiceCollection($paginatedData, $totals), 200);
     }
 
 
@@ -441,215 +428,22 @@ class InvoiceController extends Controller
         ]);
     }
 
-    private function assignedInvoices(Request $request){
-        $filters = $request->filter ?? null;
+    private function assignedInvoices(Request $request)
+    {
+        $request->validate([
+            'sortXmlNumber' => 'sometimes|string|in:asc,desc',
+        ]);
+        $listing = app(\App\Services\Invoice\InvoiceListService::class);
+        $invoices = $listing->ordered(
+            $listing->query($request->filter ?? [])->get(),
+            $request->input('sortXmlNumber', 'asc'),
+        );
+        $listing->loadSources($invoices);
+        $formattedData = $invoices->map(fn ($invoice) => $listing->format($invoice));
+        $totals = app(\App\Services\Invoice\InvoiceTotalsService::class)->summarize($formattedData, 'totalInvoiceAfterDiscount');
+        $paginatedData = PaginateCollection::paginate($formattedData, $request->pageSize ?? 10);
 
-        $allInvoices = DB::table('invoice_details')
-            ->leftJoin('invoices', 'invoices.id', '=', 'invoice_details.invoice_id')
-            ->leftJoin('clients', 'invoices.client_id', '=', 'clients.id')
-            ->leftJoin('client_pay_installments', function($join) {
-                $join->on('invoice_details.invoiceable_id', '=', 'client_pay_installments.id')
-                     ->where('invoice_details.invoiceable_type', '=', 'App\\Models\\Client\\ClientPayInstallment');
-            })
-            ->whereNull('invoices.deleted_at')
-            ->whereNull('invoice_details.deleted_at')
-            ->when($filters['unassigned'] == 0, function ($query) {
-                $query->whereDate('invoice_details.created_at', '>', Carbon::parse('2026-01-04'));
-            })
-            ->when(isset($filters['payStatus']), function ($query) use ($filters) {
-                return $query->where('invoices.pay_status', $filters['payStatus']);
-            })
-            ->select([
-                'invoices.id as invoiceId',
-                'invoices.created_at as invoiceCreatedAt',
-                'invoices.invoice_xml_number as invoiceXmlNumber',
-                'invoices.pay_status as invoicePayStatus',
-                'invoices.start_date as invoiceStartDate',
-                'clients.id as clientId',
-                'clients.total_tax as clientTotalTax',
-                'clients.ragione_sociale as clientName',
-                'clients.addable_to_bulk_invoice as clientAddableToBulkInvoice',
-                'invoices.number as invoiceNumber',
-                'invoices.discount_type as invoiceDiscountType',
-                'invoices.discount_amount as invoiceDiscountAmount',
-                'invoice_details.id as invoiceDetailId',
-                'invoice_details.price as invoiceDetailPrice',
-                'invoice_details.price_after_discount as invoiceDetailPriceAfterDiscount',
-                'invoice_details.invoiceable_id as invoiceableId',
-                'invoice_details.invoiceable_type as invoiceableType',
-                'invoice_details.extra_price as invoiceDetailExtraPrice',
-                'invoice_details.description as invoiceDetailDescription',
-                'client_pay_installments.start_at as installmentStartAt',
-                /*'tasks.id as taskId',
-                'tasks.status as taskStatus',
-                'tasks.title as taskTitle',
-                'tasks.price as taskPrice',
-                'tasks.created_at as taskCreatedAt',
-                'tasks.price_after_discount as taskPriceAfterDiscount',
-                'tasks.number as taskNumber',
-                'tasks.invoice_id as invoiceId',
-                'service_categories.id as serviceCategoryId',
-                'service_categories.name as serviceCategoryName',
-                'service_categories.price as serviceCategoryPrice',
-                'service_categories.add_to_invoice as serviceCategoryAddToInvoice',
-                'service_categories.extra_is_pricable as extraIsPricable',
-                'service_categories.extra_code as extraCode',
-                'service_categories.extra_price as extraPrice',*/
-            ])
-            ->when(isset($filters['clientId']), function ($query) use ($filters) {
-                return $query->where('clients.id', $filters['clientId']);
-            })
-            ->when(isset($filters['startAt']) && isset($filters['endAt']), function ($query) use ($filters) {
-                return $query->whereBetween(DB::raw('COALESCE(invoices.start_date, client_pay_installments.start_at, invoices.created_at)'), [
-                    Carbon::parse($filters['startAt'])->startOfDay(),
-                    Carbon::parse($filters['endAt'])->endOfDay(),
-                ]);
-            })
-            ->when(isset($filters['startAt']) && !isset($filters['endAt']), function ($query) use ($filters) {
-                return $query->where(DB::raw('COALESCE(invoices.start_date, client_pay_installments.start_at, invoices.created_at)'), '>=', Carbon::parse($filters['startAt'])->startOfDay());
-            })
-            ->when(!isset($filters['startAt']) && isset($filters['endAt']), function ($query) use ($filters) {
-                return $query->where(DB::raw('COALESCE(invoices.start_date, client_pay_installments.start_at, invoices.created_at)'), '<=', Carbon::parse($filters['endAt'])->endOfDay());
-            })
-            ->when(isset($filters['hasXmlNumber']), function ($query) use ($filters) {
-                if ($filters['hasXmlNumber'] == 1) {
-                    return $query->whereNotNull('invoices.invoice_xml_number');
-                } elseif ($filters['hasXmlNumber'] == 0) {
-                    return $query->whereNull('invoices.invoice_xml_number');
-                }
-            })
-            ->when(isset($filters['hasProforma']), function ($query) use ($filters) {
-                if ($filters['hasProforma'] == 1) {
-                    return $query->where('clients.proforma', 1);
-                } elseif ($filters['hasProforma'] == 0) {
-                    return $query->where(function($q) {
-                        $q->where('clients.proforma', 0)
-                          ->orWhereNull('clients.proforma');
-                    });
-                }
-            })
-            ->get();
-
-        // Format the data
-        $formattedData = [];
-        $invoiceIndexer = 0;
-        foreach ($allInvoices as $index =>$invoice) {
-            $key = $invoice->invoiceId;
-
-            $invoiceClientPayInstallment = InvoiceDetail::where('invoice_id', $invoice->invoiceId)->where('invoiceable_type', ClientPayInstallment::class)->first();
-
-            // Priority: start_date (if set) → installmentStartAt → invoiceCreatedAt
-            if (!empty($invoice->invoiceStartDate)) {
-                $invoiceDate = $invoice->invoiceStartDate;
-            } else {
-                $invoiceDate = $invoice->installmentStartAt ?? $invoice->invoiceCreatedAt;
-            }
-
-            // Format date to Y-m-d only (remove time)
-            if ($invoiceDate) {
-                $invoiceDate = Carbon::parse($invoiceDate)->format('Y-m-d');
-            }
-
-            if (!in_array($key, array_column($formattedData, 'key'))) {
-                $formattedData[] = [
-                    'key' => $key,
-                    'invoiceId' => $invoice->invoiceId??"",
-                    'invoiceNumber' => $invoice->invoiceNumber ?? "",
-                    'invoiceXmlNumber' => $invoice->invoiceXmlNumber ?? "",
-                    'clientId' => $invoice->clientId ?? "",
-                    'clientName' => $invoice->clientName ?? "",
-                    'clientAddableToBulkInvoice' => $invoice->clientAddableToBulkInvoice ?? "",
-                    'tasks' => [],
-                    'totalPrice' => 0,
-                    'totalPriceAfterDiscount' => 0,
-                    'totalCosts' => 0,
-                    'invoiceDiscountType' => $invoice->invoiceDiscountType,
-                    'invoiceDiscountAmount' => $invoice->invoiceDiscountAmount,
-                    'clientTotalTax' => $invoice->clientTotalTax,
-                    'invoiceDiscount' => 0,
-                    'totalInvoiceAfterDiscount' => 0,
-                    'invoiceDate' => $invoiceDate,
-                    'startAt' => $invoice->invoiceStartDate ?? null,
-                    'payStatus' => $invoice->invoicePayStatus ?? 0,
-                ];
-
-                /*if(count($formattedData) >1) {
-                    $formattedData[$invoiceIndexer - 1]['totalAfterAdditionalTax'] += ($formattedData[$invoiceIndexer - 1]['totalAfterAdditionalTax'] * .22);
-                }*/
-                    $invoiceIndexer++;
-
-
-            }
-
-
-            $search = array_search($key, array_column($formattedData, 'key'));
-
-
-            $formattedData[$search]['totalPrice'] += $invoice->invoiceDetailPrice;
-            $formattedData[$search]['totalPriceAfterDiscount'] += $invoice->invoiceDetailPriceAfterDiscount;
-            $formattedData[$search]['totalCosts'] += $invoice->invoiceDetailExtraPrice??0;
-
-            $task = $invoice->invoiceableType == Task::class ? Task::with('serviceCategory')->find($invoice->invoiceableId) : "";
-
-            $description = "";
-
-            if ($task && $description == null) {
-                $description = $task->serviceCategory->name;
-            } elseif($invoice->invoiceableType == ClientPayInstallment::class && $description == null) {
-                $description = ClientPayInstallment::with('parameterValue')->find($invoice->invoiceableId)?->parameterValue?->description;
-
-
-            }elseif($invoice->invoiceableType == ClientPayInstallmentSubData::class && $description == null) {
-                $description = ClientPayInstallment::with('parameterValue')->find($invoice->invoiceableId)?->parameterValue?->description;
-            }
-
-            if($invoice->invoiceDetailDescription != null) {
-                $description = $invoice->invoiceDetailDescription;
-            }
-
-            $formattedData[$search]['tasks'][] = [
-                'taskId' => $invoice->invoiceDetailId,
-                'taskTitle' => $task->title??"",
-                'taskNumber' => $task->number??"",
-                'serviceCategoryName' => $description??'',
-                'description' => $description??'',
-                'price' =>$invoice->invoiceDetailPrice,
-                'priceAfterDiscount' =>$invoice->invoiceDetailPriceAfterDiscount,
-                'extraPrice' => $invoice->invoiceDetailExtraPrice??0,
-                //'taskCreatedAt' => Carbon::parse($invoice->taskCreatedAt)->format('d/m/Y')
-            ];
-
-
-            if(count($formattedData) > 0) {
-                $formattedData[$search]['additionalTax'] = $formattedData[$search]['clientTotalTax'];
-                $formattedData[$search]['totalAfterAdditionalTax'] = $formattedData[$search]['totalPriceAfterDiscount'] + ($formattedData[$search]['totalPriceAfterDiscount'] * .22);
-
-                $formattedData[$search]['invoiceDiscount'] = 0 ;
-                $formattedData[$search]['totalInvoiceAfterDiscount'] = $formattedData[$search]['totalAfterAdditionalTax'];
-
-                if($formattedData[$search]['additionalTax'] > 0) {
-                    $formattedData[$search]['totalAfterAdditionalTax'] = $formattedData[$search]['totalAfterAdditionalTax'] + ($formattedData[$search]['totalAfterAdditionalTax'] * ($formattedData[$search]['additionalTax'] / 100));
-                }
-
-                if($invoice->invoiceDiscountType == 0) {
-                    $formattedData[$search]['invoiceDiscount'] = $invoice->invoiceDiscountAmount;
-                    $formattedData[$search]['totalInvoiceAfterDiscount'] = ($formattedData[$search]['totalAfterAdditionalTax'] - $invoice->invoiceDiscountAmount);
-                }
-
-                if($invoice->invoiceDiscountType == 1) {
-                    $formattedData[$search]['invoiceDiscount'] = $invoice->invoiceDiscountAmount;
-                    $formattedData[$search]['totalInvoiceAfterDiscount'] = ($formattedData[$search]['totalAfterAdditionalTax'] - ($formattedData[$search]['totalAfterAdditionalTax'] * ($invoice->invoiceDiscountAmount / 100)));
-                }
-
-            }
-
-        }
-
-        // Paginate the formatted data
-        $pageSize = $request->pageSize ?? 10;
-        $paginatedData = PaginateCollection::paginate(collect($formattedData), $pageSize);
-
-        return response()->json(new AllInvoiceCollection($paginatedData), 200);
+        return response()->json(new AllInvoiceCollection($paginatedData, $totals), 200);
     }
 
     public function update(Request $request)

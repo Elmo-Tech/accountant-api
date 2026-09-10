@@ -9,7 +9,7 @@ class InvoiceListCollection extends ResourceCollection
 {
     private $pagination;
 
-    public function __construct($resource)
+    public function __construct($resource, private array $totals)
     {
         $this->pagination = [
             'total'        => $resource->total(),
@@ -31,6 +31,7 @@ class InvoiceListCollection extends ResourceCollection
                 'invoices' => $this->collection->values()->all(),
             ],
             'pagination' => $this->pagination,
+            'totals' => $this->totals,
         ];
     }
 }

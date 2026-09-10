@@ -20,4 +20,9 @@ class InvoiceDetail extends Model
         'extra_price',
         'description'
     ];
+
+    public function invoiceable(): \Illuminate\Database\Eloquent\Relations\MorphTo
+    {
+        return $this->morphTo();
+    }
 }

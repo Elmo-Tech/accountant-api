@@ -24,6 +24,16 @@ class ClientPaymentExportController extends Controller
 
     public function index(Request $request)
     {
+        $request->validate([
+            'clientId' => 'nullable|integer',
+            'startAt' => 'nullable|date',
+            'endAt' => 'nullable|date',
+            'filter' => 'nullable|array',
+            'filter.clientId' => 'nullable|integer',
+            'filter.startAt' => 'nullable|date',
+            'filter.endAt' => 'nullable|date',
+        ]);
+        $filters = array_merge($request->only(['clientId', 'startAt', 'endAt']), $request->input('filter', []));
         $spreadsheet = new Spreadsheet();
 
         // 1. جلب قاموس الفئات (Macro Servizi) - نفترض أن parameter_order = 12 هي الفئات
@@ -40,6 +50,9 @@ class ClientPaymentExportController extends Controller
             ->whereNull('c.deleted_at')
             ->leftJoin('parameter_values as pv', 'pv.id', '=', 'cpi.parameter_value_id')
             ->whereIn('pv.parameter_id', [8, 9])
+            ->when(isset($filters['clientId']), fn ($q) => $q->where('cpi.client_id', $filters['clientId']))
+            ->when(isset($filters['startAt']), fn ($q) => $q->whereDate('cpi.end_at', '>=', Carbon::parse($filters['startAt'])->format('Y-m-d')))
+            ->when(isset($filters['endAt']), fn ($q) => $q->whereDate('cpi.end_at', '<=', Carbon::parse($filters['endAt'])->format('Y-m-d')))
             ->select(
                 'cpi.id',
                 'cpi.client_id',
@@ -58,6 +71,8 @@ class ClientPaymentExportController extends Controller
         foreach ($rawInstallments as $inst) {
             // إضافة الحركة الأساسية
             $allTransactions->push([
+                'source_type' => \App\Models\Client\ClientPayInstallment::class,
+                'source_id' => $inst->id,
                 'client_id'       => $inst->client_id,
                 'ragione_sociale' => $inst->ragione_sociale,
                 'date'            => $inst->end_at ? Carbon::parse($inst->end_at)->format('d/m/Y') : '',
@@ -74,6 +89,7 @@ class ClientPaymentExportController extends Controller
                 ->whereNull('sub.deleted_at')
                 ->leftJoin('parameter_values as pv_sub', 'pv_sub.id', '=', 'sub.parameter_value_id')
                 ->select(
+                    'sub.id as source_id',
                     'pv_sub.id as pv_id',
                     'pv_sub.parameter_value as pv_name',
                     'pv_sub.description',
@@ -84,6 +100,8 @@ class ClientPaymentExportController extends Controller
 
             foreach ($subs as $sub) {
                 $allTransactions->push([
+                    'source_type' => \App\Models\Client\ClientPayInstallmentSubData::class,
+                    'source_id' => $sub->source_id,
                     'client_id'       => $inst->client_id,
                     'ragione_sociale' => $inst->ragione_sociale,
                     'date'            => $inst->end_at ? Carbon::parse($inst->end_at)->format('d/m/Y') : '',
@@ -113,14 +131,14 @@ class ClientPaymentExportController extends Controller
             $row++;
         }
         $sheet->setCellValue('A' . $row, 'TOTALE');
-        $sheet->setCellValue('D' . $row, "=SUM(D2:D" . ($row - 1) . ")");
+        $sheet->setCellValue('D' . $row, $row > 2 ? "=SUM(D2:D" . ($row - 1) . ")" : 0);
         $this->applyStyle($sheet, 'D', $row);
 
         // ===================== الصفحة 2: Proposta =====================
         $proposta = $spreadsheet->createSheet();
         $proposta->setTitle('Proposta');
 
-        $activePvs = $allTransactions->where('amount', '>', 0)->groupBy('pv_id');
+        $activePvs = $allTransactions->where('amount', '!=', 0)->groupBy('pv_id');
         $pvColMap = [];
         $col = 2;
         $proposta->setCellValueByColumnAndRow(1, 1, 'Cliente');
@@ -148,7 +166,7 @@ class ClientPaymentExportController extends Controller
         $macro->setTitle('Macro_Servizi');
 
         // جلب الفئات التي تحتوي على مبالغ فقط لعدم عرض أعمدة فارغة
-        $activeCats = $allTransactions->where('amount', '>', 0)->pluck('cat_name')->unique()->sort();
+        $activeCats = $allTransactions->where('amount', '!=', 0)->pluck('cat_name')->unique()->sort();
         $catColMap = [];
         $col = 2;
         $macro->setCellValueByColumnAndRow(1, 1, 'Cliente');
@@ -162,7 +180,7 @@ class ClientPaymentExportController extends Controller
 
         $mRow = 2;
         // عرض العملاء الذين لديهم تعاملات فقط
-        foreach ($allTransactions->where('amount', '>', 0)->groupBy('client_id') as $clientId => $clientTrans) {
+        foreach ($allTransactions->where('amount', '!=', 0)->groupBy('client_id') as $clientId => $clientTrans) {
             $macro->setCellValueByColumnAndRow(1, $mRow, $clientTrans->first()['ragione_sociale']);
             foreach ($catColMap as $catName => $colIdx) {
                 $macro->setCellValueByColumnAndRow($colIdx, $mRow, $clientTrans->where('cat_name', $catName)->sum('amount'));
@@ -181,15 +199,17 @@ class ClientPaymentExportController extends Controller
         $rRow = 2;
         foreach ($allTransactions->groupBy('cat_name') as $catName => $items) {
             $catSum = $items->sum('amount');
-            if ($catSum > 0) {
+            if ($catSum != 0) {
                 $riepilogo->setCellValue('A' . $rRow, $catName);
                 $riepilogo->setCellValue('B' . $rRow, $catSum);
                 $rRow++;
             }
         }
         $riepilogo->setCellValue('A' . $rRow, 'TOTALE');
-        $riepilogo->setCellValue('B' . $rRow, "=SUM(B2:B" . ($rRow - 1) . ")");
+        $riepilogo->setCellValue('B' . $rRow, $rRow > 2 ? "=SUM(B2:B" . ($rRow - 1) . ")" : 0);
         $this->applyStyle($riepilogo, 'B', $rRow);
+
+        $this->addInvoiceReconciliation($spreadsheet, $allTransactions, $filters);
 
         // تصدير الملف
         $fileName = 'client_payments_' . now()->format('YmdHis') . '.xlsx';
@@ -200,6 +220,46 @@ class ClientPaymentExportController extends Controller
         Storage::disk('public')->put($filePath, ob_get_clean());
 
         return response()->json(['path' => Storage::disk('public')->url($filePath)]);
+    }
+
+    private function addInvoiceReconciliation(Spreadsheet $spreadsheet, $scheduled, array $filters): void
+    {
+        $listing = app(\App\Services\Invoice\InvoiceListService::class);
+        // This workbook uses due dates, like the payment schedule and income stats.
+        $invoices = $listing->ordered($listing->query(array_intersect_key($filters, ['clientId' => true]))
+            ->when(isset($filters['startAt']), fn ($q) => $q->whereDate('invoices.end_at', '>=', Carbon::parse($filters['startAt'])->format('Y-m-d')))
+            ->when(isset($filters['endAt']), fn ($q) => $q->whereDate('invoices.end_at', '<=', Carbon::parse($filters['endAt'])->format('Y-m-d')))
+            ->get());
+        $calculator = app(\App\Services\Invoice\InvoiceTotalsService::class);
+        $sheet = $spreadsheet->createSheet();
+        $sheet->setTitle('Fatture');
+        $sheet->fromArray(['Cliente', 'ID fattura', 'Numero fattura', 'Scadenza', 'Imponibile', 'IVA 22%', 'Spese escluse IVA', 'Bollo', 'Totale', 'Verifica numero'], null, 'A1');
+        $row = 2;
+        foreach ($invoices as $invoice) {
+            $amounts = $calculator->forInvoice($invoice);
+            $sheet->fromArray([
+                $invoice->client?->ragione_sociale ?? '', $invoice->id, $invoice->invoice_xml_number ?? '',
+                $invoice->end_at ? Carbon::parse($invoice->end_at)->format('d/m/Y') : '',
+                $amounts['taxableAmount'], $amounts['ivaAmount'], $amounts['extraTotal'],
+                $amounts['stampAmount'], $amounts['total'],
+                trim((string) $invoice->invoice_xml_number) === '' ? 'Numero XML assente: verificare emissione' : 'Numero presente',
+            ], null, 'A'.$row, true);
+            $row++;
+        }
+        $sheet->getStyle('E2:I'.max(2, $row - 1))->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->setAutoFilter('A1:J'.max(1, $row - 1));
+        $this->applyStyle($sheet, 'J', max(1, $row - 1));
+
+        $comparison = $spreadsheet->createSheet();
+        $comparison->setTitle('Riconciliazione');
+        $comparison->fromArray(['Cliente', 'Descrizione', 'Origine', 'Importo previsto netto', 'Importo fatturato netto', 'Differenza netta', 'Spese escluse IVA', 'ID fatture', 'ID senza numero XML', 'Esito'], null, 'A1');
+        $rows = app(\App\Services\Invoice\InvoiceReconciliationService::class)->compare($scheduled, $invoices);
+        if ($rows) {
+            $comparison->fromArray($rows, null, 'A2', true);
+        }
+        $comparison->getStyle('D2:G'.max(2, count($rows) + 1))->getNumberFormat()->setFormatCode('#,##0.00');
+        $comparison->setAutoFilter('A1:J'.(count($rows) + 1));
+        $this->applyStyle($comparison, 'J', count($rows) + 1);
     }
 
     private function applyStyle($sheet, $lastCol, $lastRow) {
@@ -213,7 +273,7 @@ class ClientPaymentExportController extends Controller
         $sheet->setCellValueByColumnAndRow(1, $row, 'TOTALE');
         for ($i = 2; $i <= $lastColIdx; $i++) {
             $colL = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i);
-            $sheet->setCellValue($colL . $row, "=SUM({$colL}2:{$colL}" . ($row - 1) . ")");
+            $sheet->setCellValue($colL . $row, $row > 2 ? "=SUM({$colL}2:{$colL}" . ($row - 1) . ")" : 0);
         }
         $sheet->getStyle("A{$row}:{$lastColLetter}{$row}")->getFont()->setBold(true);
         $this->applyStyle($sheet, $lastColLetter, $row);

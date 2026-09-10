@@ -42,6 +42,7 @@ use Illuminate\Http\Request;class PaidInvoicesTotalController extends Controller
         $end   = $endDate   ? \Carbon\Carbon::parse($endDate)->format('Y-m-d')   : null;
 
         $invoices = Invoice::with(['invoiceDetails', 'client'])
+            ->whereHas('client')->whereHas('invoiceDetails')
             ->when(!is_null($paidStatus), fn($q) => $q->where('pay_status', $paidStatus))
             ->whereNull('invoices.deleted_at')
             ->when($paidStatus === 0, fn($q) => $q->where(fn($q2) =>
@@ -56,29 +57,7 @@ use Illuminate\Http\Request;class PaidInvoicesTotalController extends Controller
         $total = 0;
 
         foreach ($invoices as $invoice) {
-            // 1. sum price_after_discount for all details
-            $subtotal = $invoice->invoiceDetails->sum('price_after_discount');
-
-            // 2. IVA 22% always
-            $subtotal = $subtotal + ($subtotal * 0.22);
-
-            // 3. client additional tax
-            if ($invoice->client && $invoice->client->total_tax > 0) {
-                $subtotal = $subtotal + ($subtotal * ($invoice->client->total_tax / 100));
-            }
-
-            // 4. invoice discount
-            if ($invoice->discount_amount > 0) {
-                if ($invoice->discount_type == 0) {
-                    // fixed
-                    $subtotal -= $invoice->discount_amount;
-                } elseif ($invoice->discount_type == 1) {
-                    // percentage
-                    $subtotal -= $subtotal * ($invoice->discount_amount / 100);
-                }
-            }
-
-            $total += $subtotal;
+            $total += app(\App\Services\Invoice\InvoiceTotalsService::class)->forInvoice($invoice)['total'];
         }
 
         return round($total, 2);

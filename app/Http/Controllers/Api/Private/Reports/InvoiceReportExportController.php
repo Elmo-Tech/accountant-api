@@ -58,147 +58,9 @@ class InvoiceReportExportController extends Controller
 
     private function getInvoiceData(Request $request)
     {
-        $invoice = Invoice::findOrFail($request->invoiceIds[0]);
-
-        $invoiceItems = DB::table('invoice_details')
-            ->where('invoice_details.invoice_id', $invoice->id)
-            ->whereNull('invoice_details.deleted_at')
-            ->select([
-                'invoice_details.price',
-                'invoice_details.price_after_discount',
-                'invoice_details.invoiceable_id',
-                'invoice_details.invoiceable_type',
-                'invoice_details.description'
-            ])->get();
-
-        $invoiceItemsData = [];
-        $invoiceTotalToCalcTax = 0;
-        $invoiceTotal = 0;
-        $invoiceTaxableTotal = 0;
-
-        $invoiceStartAt = !empty($invoice->start_date)
-            ? Carbon::parse($invoice->start_date)->format('d/m/Y')
-            : Carbon::parse($invoice->created_at)->format('d/m/Y');
-
-        foreach ($invoiceItems as $invoiceItem) {
-            $invoiceItemData = match ($invoiceItem->invoiceable_type) {
-                Task::class => Task::with('serviceCategory')->find($invoiceItem->invoiceable_id),
-                ClientPayInstallment::class => ClientPayInstallment::with('parameterValue')->find($invoiceItem->invoiceable_id),
-                ClientPayInstallmentSubData::class => ClientPayInstallmentSubData::with('parameterValue')->find($invoiceItem->invoiceable_id),
-                default => null
-            };
-
-            $description = !empty($invoiceItem->description)
-                ? $invoiceItem->description
-                : ($invoiceItem->invoiceable_type == Task::class
-                    ? $invoiceItemData->serviceCategory->name
-                    : $invoiceItemData->parameterValue?->description ?? '');
-
-            $invoiceStartAt = ($invoiceItem->invoiceable_type == ClientPayInstallment::class && empty($invoice->start_date))
-                ? Carbon::parse(ClientPayInstallment::find($invoiceItem->invoiceable_id)->start_at)->format('d/m/Y')
-                : $invoiceStartAt;
-
-            // Get service code from Task's ServiceCategory or ParameterValue
-            $serviceCode = '..'; // Default value
-
-            if ($invoiceItem->invoiceable_type == Task::class && $invoiceItemData && $invoiceItemData->serviceCategory) {
-                $serviceCode = $invoiceItemData->serviceCategory->code ?? '..';
-            } elseif ($invoiceItem->invoiceable_type == ClientPayInstallment::class && $invoiceItemData && $invoiceItemData->parameterValue) {
-                $serviceCode = $invoiceItemData->parameterValue->code ?? '..';
-            } elseif ($invoiceItem->invoiceable_type == ClientPayInstallmentSubData::class && $invoiceItemData && $invoiceItemData->parameterValue) {
-                $serviceCode = $invoiceItemData->parameterValue->code ?? '..';
-            }
-
-            // Task con prezzo a zero
-            if ($invoiceItem->invoiceable_type == Task::class && $invoiceItemData && $invoiceItemData->serviceCategory) {
-                if ($invoiceItem->price_after_discount == 0 && $invoiceItem->price == 0) {
-
-                    if ($invoiceItemData->serviceCategory->extra_is_pricable) {
-                        // Caso 1: servizio a 0 CON extra → aggiungi solo l'extra (IVA 0%, Natura N1)
-                        // La riga del servizio stesso NON va inclusa (né nel PDF né nell'XML)
-                        $extraPrice = $invoiceItemData->serviceCategory->extra_price;
-                        $invoiceItemsData[] = [
-                            'description'             => $invoiceItemData->serviceCategory->extra_price_description,
-                            'price'                   => $extraPrice,
-                            'priceAfterDiscount'      => $extraPrice,
-                            'additionalTaxPercentage' => 0,
-                            'serviceCode'             => $invoiceItemData->serviceCategory->extra_code ?? 'N1',
-                            'is_descriptive_only'     => false,
-                            'is_discount'             => false,
-                        ];
-                        $invoiceTotal += $extraPrice;
-                        // NON sommare a invoiceTaxableTotal: l'extra è fuori campo IVA / Natura N1
-                    } else {
-                        // Caso 2: servizio a 0 SENZA extra → riga puramente descrittiva
-                        // Va inclusa nel PDF e nell'XML come riga a prezzo 0
-                        $invoiceItemsData[] = [
-                            'description'             => $description,
-                            'price'                   => 0,
-                            'priceAfterDiscount'      => 0,
-                            'additionalTaxPercentage' => 22,
-                            'serviceCode'             => $serviceCode,
-                            'is_descriptive_only'     => true,
-                            'is_discount'             => false,
-                        ];
-                    }
-
-                    continue;
-                }
-            }
-
-            $invoiceItemsData[] = [
-                'description'             => $description,
-                'price'                   => $invoiceItem->price,
-                'priceAfterDiscount'      => $invoiceItem->price_after_discount,
-                'additionalTaxPercentage' => 22,
-                'serviceCode'             => $serviceCode,
-                'is_descriptive_only'     => false,
-                'is_discount'             => false,
-            ];
-
-            $invoiceTotal += $invoiceItem->price_after_discount;
-            $invoiceTotalToCalcTax += $invoiceItem->price_after_discount;
-            $invoiceTaxableTotal += $invoiceItem->price_after_discount;
-
-            // Riga extra associata (sempre IVA 0%, Natura N1)
-            if ($invoiceItem->invoiceable_type == Task::class && $invoiceItemData->serviceCategory->extra_is_pricable) {
-                $extraPrice = $invoiceItemData->serviceCategory->extra_price;
-                $invoiceItemsData[] = [
-                    'description'             => $invoiceItemData->serviceCategory->extra_price_description,
-                    'price'                   => $extraPrice,
-                    'priceAfterDiscount'      => $extraPrice,
-                    'additionalTaxPercentage' => 0,
-                    'serviceCode'             => $invoiceItemData->serviceCategory->extra_code ?? 'N1',
-                    'is_descriptive_only'     => false,
-                    'is_discount'             => false,
-                ];
-                $invoiceTotal += $extraPrice;
-                // anche qui non si tocca invoiceTaxableTotal: l'extra resta in regime N1
-            }
-        }
-
-        $client = Client::find($invoice->client_id);
-
-        if ($client->total_tax > 0) {
-            $clientTaxAmount = $invoiceTaxableTotal * ($client->total_tax / 100);
-
-            if ($client->limit_decreto > 0 && $clientTaxAmount > $client->limit_decreto) {
-                $clientTaxAmount = $client->limit_decreto;
-            }
-
-            $invoiceItemsData[] = [
-                'description'             => $client->total_tax_description ?? '',
-                'price'                   => $clientTaxAmount,
-                'priceAfterDiscount'      => $clientTaxAmount,
-                'additionalTaxPercentage' => 22,
-                'serviceCode'             => '00000001',
-                'is_descriptive_only'     => false,
-                'is_discount'             => false,
-            ];
-
-            $invoiceTotal += $clientTaxAmount;
-            $invoiceTaxableTotal += $clientTaxAmount;
-        }
+        $invoice = Invoice::with(['client', 'invoiceDetails'])->findOrFail($request->invoiceIds[0]);
+        $document = app(\App\Services\Invoice\InvoiceDocumentService::class)->build($invoice);
+        $client = $invoice->client;
 
         $clientAddressFormatted = ClientAddress::where('client_id', $client->id)->first()?->address ?? "";
 
@@ -222,35 +84,7 @@ class InvoiceReportExportController extends Controller
 
         $clientAddressData = ClientAddress::where('client_id', $client->id)->first();
 
-        if ($invoice->discount_amount > 0) {
-            $discountValue = $invoice->discount_type == 0
-                ? $invoiceTotal * ($invoice->discount_amount / 100)
-                : $invoice->discount_amount;
-
-            // Lo sconto applica IVA 22% (concorre alla base imponibile come componente negativa).
-            // Nel data array resta come valore positivo (per il PDF e i totali),
-            // nell'XML invece verrà scritto come PrezzoUnitario/PrezzoTotale NEGATIVO
-            // tramite il flag is_discount (richiesta SdI per evitare scarto 00422).
-            $invoiceItemsData[] = [
-                'description'             => "sconto",
-                'price'                   => $discountValue,
-                'priceAfterDiscount'      => $discountValue,
-                'additionalTaxPercentage' => 22,
-                'is_descriptive_only'     => false,
-                'is_discount'             => true,
-            ];
-
-            $invoiceTotal        -= $discountValue;
-            $invoiceTotalToCalcTax -= $discountValue;
-            // FIX: sottrarre lo sconto anche da invoiceTaxableTotal,
-            // altrimenti l'IVA e il bollo vengono calcolati sull'imponibile lordo
-            $invoiceTaxableTotal -= $discountValue;
-        }
-
         $paymentMethod = ParameterValue::find($invoice->payment_type_id ?? null);
-
-        // questo ricalcolo usa ora invoiceTaxableTotal già al netto dello sconto
-        $invoiceTotalToCalcTax = $invoiceTaxableTotal * 0.22;
 
         $bankAccount = null;
 
@@ -262,13 +96,8 @@ class InvoiceReportExportController extends Controller
 
         return [
             'invoice'              => $invoice,
-            'clientAddressData'    => $clientAddressData->toArray(),
-            'invoiceStartAt'       => $invoiceStartAt,
-            'invoiceItems'         => $invoiceItemsData,
-            'invoiceTotalTax'      => $invoiceTotalToCalcTax,
-            'invoiceTotal'         => $invoiceTotal,
-            'invoiceTaxableTotal'  => $invoiceTaxableTotal,
-            'invoiceTotalWithTax'  => $invoiceTotal + $invoiceTotalToCalcTax,
+            'clientAddressData'    => $clientAddressData?->toArray() ?? [],
+            ...$document,
             'client'               => $client,
             'clientAddress'        => $clientAddressFormatted,
             'clientBankAccount'    => $clientBankAccountFormatted,
@@ -286,17 +115,6 @@ class InvoiceReportExportController extends Controller
 
     private function generateInvoicePdf(array $data)
     {
-        $extraTotal = 0;
-
-        foreach ($data['invoiceItems'] as $item) {
-            if ((float)($item['additionalTaxPercentage'] ?? 22) == 0) {
-                $extraTotal += (float)$item['priceAfterDiscount'];
-            }
-        }
-
-        $data['applyStamp'] = $extraTotal > 77.47;
-        $data['stampAmount'] = 2.00;
-
         $pdf = PDF::loadView('invoice_pdf_report', $data);
 
         $fileName = 'invoice_' . $data['invoice']->id . '_' . now()->format('d_m_Y_H_i_s') . '.pdf';
@@ -322,16 +140,39 @@ class InvoiceReportExportController extends Controller
         $sheet->getStyle('A1:C1')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
 
         $row = 2;
+        $lineTotal = 0;
         foreach ($data['invoiceItems'] as $entry) {
             $price = (float)($entry['priceAfterDiscount'] ?? 0);
+            if (!empty($entry['is_discount'])) {
+                $price = -abs($price);
+            }
             $tax   = (float)($entry['additionalTaxPercentage'] ?? 22);
             $total = $tax > 0 ? $price * (1 + $tax / 100) : $price;
 
             $sheet->setCellValue('A' . $row, $data['client']->ragione_sociale ?? '');
             $sheet->setCellValue('B' . $row, $entry['description'] ?? '');
             $sheet->setCellValue('C' . $row, round($total, 2));
+            $lineTotal += round($total, 2);
             $row++;
         }
+
+        // IVA is rounded on the invoice base, rather than independently per line.
+        $rounding = round($data['invoiceTotalWithTax'] - $lineTotal, 2);
+        if ($rounding != 0) {
+            $sheet->fromArray([$data['client']->ragione_sociale ?? '', 'Arrotondamento IVA', $rounding], null, 'A'.$row++);
+        }
+        if ($data['applyStamp']) {
+            $sheet->fromArray([$data['client']->ragione_sociale ?? '', 'Imposta di bollo', $data['stampAmount']], null, 'A'.$row++);
+        }
+
+        $sheet->fromArray([
+            ['Imponibile', $data['invoiceTaxableTotal']],
+            ['IVA 22%', $data['invoiceTotalTax']],
+            ['Totale fattura', round($data['invoiceTotalWithTax'] + $data['stampAmount'], 2)],
+        ], null, 'E1', true);
+        $sheet->getStyle('F1:F3')->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getColumnDimension('E')->setAutoSize(true);
+        $sheet->getColumnDimension('F')->setAutoSize(true);
 
         $sheet->getStyle('A1:C' . ($row - 1))
             ->getBorders()->getAllBorders()->setBorderStyle(Border::BORDER_THIN);
@@ -378,13 +219,17 @@ class InvoiceReportExportController extends Controller
         $row = 2;
 
         foreach ($data['invoiceItems'] as $entry) {
+            $price = (float) ($entry['priceAfterDiscount'] ?? 0);
+            if (!empty($entry['is_discount'])) {
+                $price = -abs($price);
+            }
             $sheet
                 ->setCellValue('A' . $row, $data['client']->ragione_sociale ?? '')
                 ->setCellValue('B' . $row, $entry['description'] ?? '')
-                ->setCellValue('C' . $row, $entry['priceAfterDiscount'] ?? 0)
+                ->setCellValue('C' . $row, $price)
                 ->setCellValue('D' . $row, $entry['quantita'] ?? 1)
-                ->setCellValue('E' . $row, ($entry['priceAfterDiscount'] ?? 0) * ($entry['quantita'] ?? 1))
-                ->setCellValue('F' . $row, Carbon::parse($data['invoice']->created_at)->format('d/m/Y'));
+                ->setCellValue('E' . $row, $price * ($entry['quantita'] ?? 1))
+                ->setCellValue('F' . $row, $data['invoiceStartAt']);
             $row++;
         }
 
@@ -461,8 +306,8 @@ class InvoiceReportExportController extends Controller
             }
         }
 
-        $applyStamp = $extraTotal > 77.47;
-        $stampAmount = 2.00;
+        $applyStamp = $data['applyStamp'];
+        $stampAmount = $data['stampAmount'];
         $totalWithStamp = (float)$data['invoiceTotalWithTax'] + ($applyStamp ? $stampAmount : 0);
 
         /* ================= 1. Build basic structure without Namespaces temporarily ================= */
@@ -663,7 +508,7 @@ class InvoiceReportExportController extends Controller
             }
 
             // Salta righe non valorizzate che non sono né descrittive né sconto
-            if ($prezzo <= 0 && !$isDescriptive && !$isDiscount) continue;
+            if ($prezzo == 0 && !$isDescriptive && !$isDiscount) continue;
 
             $aliquota = (float)($item['additionalTaxPercentage'] ?? 22);
             $det = $beni->addChild('DettaglioLinee');
@@ -685,7 +530,7 @@ class InvoiceReportExportController extends Controller
             $det->addChild('AliquotaIVA', number_format($aliquota, 2, '.', ''));
 
             // Natura solo per righe con IVA 0% E valore positivo (extra/escluse)
-            if ($aliquota == 0 && $prezzo > 0) {
+            if ($aliquota == 0 && $prezzo != 0) {
                 $natura = $item['serviceCode'] ?? 'N1';
                 if (!preg_match('/^N[1-7](\.[0-9])?$/', $natura)) {
                     $natura = 'N1';
@@ -714,7 +559,7 @@ class InvoiceReportExportController extends Controller
         $riep->addChild('Imposta', number_format((float)$data['invoiceTotalTax'], 2, '.', ''));
         $riep->addChild('EsigibilitaIVA', 'I');
 
-        if ($extraTotal > 0) {
+        if ($extraTotal != 0) {
             $riepN1 = $beni->addChild('DatiRiepilogo');
             $riepN1->addChild('AliquotaIVA', '0.00');
             $riepN1->addChild('Natura', 'N1');
