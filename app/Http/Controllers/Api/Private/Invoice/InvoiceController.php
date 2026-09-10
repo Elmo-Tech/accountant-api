@@ -436,7 +436,7 @@ class InvoiceController extends Controller
         $listing = app(\App\Services\Invoice\InvoiceListService::class);
         $invoices = $listing->ordered(
             $listing->query($request->filter ?? [])->get(),
-            $request->input('sortXmlNumber', 'asc'),
+            $request->input('sortXmlNumber', 'desc'),
         );
         $listing->loadSources($invoices);
         $formattedData = $invoices->map(fn ($invoice) => $listing->format($invoice));
