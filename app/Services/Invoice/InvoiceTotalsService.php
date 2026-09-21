@@ -42,36 +42,38 @@ class InvoiceTotalsService
         int|string|null $discountType = null,
         float $discountAmount = 0,
     ): array {
-        $subtotal = round($subtotal, 2);
-        $extraTotal = round($extraTotal, 2);
-        $additionalAmount = round($subtotal * $additionalRate / 100, 2);
+        // Match legacy calculation order: retain precision through surcharge,
+        // discount and IVA; round only the returned monetary values.
+        $additionalAmount = $subtotal * $additionalRate / 100;
         if ($additionalLimit > 0) {
             $additionalAmount = min($additionalAmount, $additionalLimit);
         }
 
-        $taxableBeforeDiscount = round($subtotal + $additionalAmount, 2);
-        // Existing API contract: 0 = fixed amount, 1 = percentage.
-        // Discounts reduce the taxable base; excluded expenses retain their value.
+        $taxableBeforeDiscount = $subtotal + $additionalAmount;
+        $discountBase = $taxableBeforeDiscount + $extraTotal;
+        // API contract: 0 = percentage, 1 = fixed amount.
+        // Legacy percentage base includes extras, before IVA and stamp.
+        // The resulting discount reduces the taxable base; extras remain VAT-exempt.
         $discount = match ((string) $discountType) {
-            '0' => $discountAmount,
-            '1' => $taxableBeforeDiscount * $discountAmount / 100,
+            '0' => $discountBase * $discountAmount / 100,
+            '1' => $discountAmount,
             default => 0,
         };
-        $discount = round(min(max(0, $discount), max(0, $taxableBeforeDiscount)), 2);
-        $taxableAmount = round($taxableBeforeDiscount - $discount, 2);
-        $ivaAmount = round($taxableAmount * 0.22, 2);
+        $discount = min(max(0, $discount), max(0, $taxableBeforeDiscount));
+        $taxableAmount = $taxableBeforeDiscount - $discount;
+        $ivaAmount = $taxableAmount * 0.22;
         // Preserve the stamp rule already used by PDF/XML exports.
         $stampAmount = $extraTotal > 77.47 ? 2.0 : 0.0;
-        $netTotal = round($taxableAmount + $extraTotal, 2);
+        $netTotal = $taxableAmount + $extraTotal;
 
         return [
-            'subtotal' => $subtotal,
-            'extraTotal' => $extraTotal,
-            'additionalAmount' => $additionalAmount,
-            'discountAmount' => $discount,
-            'taxableAmount' => $taxableAmount,
-            'ivaAmount' => $ivaAmount,
-            'netTotal' => $netTotal,
+            'subtotal' => round($subtotal, 2),
+            'extraTotal' => round($extraTotal, 2),
+            'additionalAmount' => round($additionalAmount, 2),
+            'discountAmount' => round($discount, 2),
+            'taxableAmount' => round($taxableAmount, 2),
+            'ivaAmount' => round($ivaAmount, 2),
+            'netTotal' => round($netTotal, 2),
             'totalWithTax' => round($netTotal + $ivaAmount, 2),
             'stampAmount' => $stampAmount,
             'total' => round($netTotal + $ivaAmount + $stampAmount, 2),
