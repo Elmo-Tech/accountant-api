@@ -18,6 +18,11 @@ class SendInvoiceController extends Controller
     private const OCR_API_KEY =
         'cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d';
 
+    private const TEMP_EMAILS = [
+        'MOHAMEDELHADDAD997@gmail.com',
+        'mr10dev10@gmail.com',
+    ];
+
     protected $uploadService;
 
     public function __construct(UploadService $uploadService)
@@ -42,7 +47,7 @@ class SendInvoiceController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Prepare HTTP request
+        | Prepare OCR Request
         |--------------------------------------------------------------------------
         */
 
@@ -56,7 +61,7 @@ class SendInvoiceController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Store local files
+        | Upload Files Locally + Attach To OCR Request
         |--------------------------------------------------------------------------
         */
 
@@ -81,12 +86,6 @@ class SendInvoiceController extends Controller
                 'storage_path' => $uploadedPath,
             ];
 
-            /*
-            |--------------------------------------------------------------------------
-            | Attach PDF to Python request
-            |--------------------------------------------------------------------------
-            */
-
             $httpRequest->attach(
                 'files[]',
                 file_get_contents($fullPath),
@@ -99,7 +98,7 @@ class SendInvoiceController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Send files to Python OCR API
+        | Send Files To Python OCR Service
         |--------------------------------------------------------------------------
         */
 
@@ -119,7 +118,7 @@ class SendInvoiceController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Check remote response
+        | Check OCR Response
         |--------------------------------------------------------------------------
         */
 
@@ -136,7 +135,7 @@ class SendInvoiceController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Validate Python response
+        | Validate OCR Response
         |--------------------------------------------------------------------------
         */
 
@@ -153,7 +152,7 @@ class SendInvoiceController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Process each OCR result
+        | Process Results
         |--------------------------------------------------------------------------
         */
 
@@ -168,11 +167,13 @@ class SendInvoiceController extends Controller
                 'success' => $ocrResult['success'] ?? false,
                 'cf' => $ocrResult['cf'] ?? null,
                 'status' => $ocrResult['status'] ?? null,
+                'client_found' => false,
+                'email_sent' => false,
             ];
 
             /*
             |--------------------------------------------------------------------------
-            | OCR failed
+            | OCR Failed
             |--------------------------------------------------------------------------
             */
 
@@ -189,7 +190,7 @@ class SendInvoiceController extends Controller
 
             /*
             |--------------------------------------------------------------------------
-            | Codice Fiscale not found
+            | Codice Fiscale Not Found
             |--------------------------------------------------------------------------
             */
 
@@ -201,9 +202,6 @@ class SendInvoiceController extends Controller
                     $ocrResult['message']
                     ?? 'Codice Fiscale not found';
 
-                $result['client_found'] = false;
-                $result['email_sent'] = false;
-
                 $results[] = $result;
 
                 continue;
@@ -211,7 +209,7 @@ class SendInvoiceController extends Controller
 
             /*
             |--------------------------------------------------------------------------
-            | Find client
+            | Find Client By Codice Fiscale
             |--------------------------------------------------------------------------
             */
 
@@ -219,8 +217,6 @@ class SendInvoiceController extends Controller
 
             if (! $client) {
 
-                $result['client_found'] = false;
-                $result['email_sent'] = false;
                 $result['message'] =
                     'Client not found for this Codice Fiscale';
 
@@ -233,42 +229,27 @@ class SendInvoiceController extends Controller
 
             /*
             |--------------------------------------------------------------------------
-            | Check client email
-            |--------------------------------------------------------------------------
-            */
-
-            if (! $client->email) {
-
-                $result['email_sent'] = false;
-                $result['message'] =
-                    'Client found but email is missing';
-
-                $results[] = $result;
-
-                continue;
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Send invoice email
+            | Send To Temporary Fixed Emails
             |--------------------------------------------------------------------------
             */
 
             try {
 
-                $this->sendInvoiceToClient(
-                    $client->email,
+                $this->sendInvoiceToTemporaryEmails(
                     $uploadedFile['path'],
                     $uploadedFile['name']
                 );
 
                 $result['email_sent'] = true;
-                $result['email'] = $client->email;
+
+                $result['emails'] = self::TEMP_EMAILS;
 
             } catch (\Throwable $e) {
 
                 $result['email_sent'] = false;
-                $result['email_error'] = $e->getMessage();
+
+                $result['email_error'] =
+                    $e->getMessage();
             }
 
             $results[] = $result;
@@ -276,45 +257,50 @@ class SendInvoiceController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Final response
+        | Final Response
         |--------------------------------------------------------------------------
         */
 
-        $hasErrors = collect($results)->contains(
+        $hasWarnings = collect($results)->contains(
             function ($result) {
+
                 return
                     ($result['success'] ?? false) === false
-                    || ($result['cf'] ?? null) === null
+                    || empty($result['cf'])
                     || ($result['client_found'] ?? false) === false
                     || ($result['email_sent'] ?? false) === false;
             }
         );
 
         return response()->json([
-            'message' => $hasErrors
+            'message' => $hasWarnings
                 ? 'Files processed with some warnings'
                 : 'All files processed successfully',
+
             'results' => $results,
         ]);
     }
 
-    /**
-     * Send invoice PDF to client.
-     */
-    private function sendInvoiceToClient(
-        string $email,
+    /*
+    |--------------------------------------------------------------------------
+    | Send Invoice To Temporary Emails
+    |--------------------------------------------------------------------------
+    */
+
+    private function sendInvoiceToTemporaryEmails(
         string $pdfPath,
         string $fileName
     ): void {
+
         Mail::raw(
             'Here is your invoice.',
             function ($message) use (
-                $email,
                 $pdfPath,
                 $fileName
             ) {
+
                 $message
-                    ->to($email)
+                    ->to(self::TEMP_EMAILS)
                     ->subject('Your Invoice')
                     ->attach(
                         $pdfPath,
