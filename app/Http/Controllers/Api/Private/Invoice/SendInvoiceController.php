@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 
 
 class SendInvoiceController extends Controller
@@ -23,27 +24,30 @@ class SendInvoiceController extends Controller
     public function index(Request $request)
     {
         $request->validate([
+            'files' => 'required|array|min:1',
             'files.*' => 'required|mimes:pdf|max:10240',
         ]);
 
-        $httpRequest = Http::asMultipart();
-        $fileNames = [];
+        $httpRequest = Http::acceptJson()->asMultipart()
+            ->withHeaders(['X-API-Key' => 'cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d'])
+            ->connectTimeout(10)
+            ->timeout((int) config('services.f24_ocr.timeout', 120));
 
-        foreach ($request->file('files') as $i => $file) {
+        foreach ($request->file('files') as $file) {
             $uploadedPath = $this->uploadService->uploadFile($file, 'uploadedInvoices');
-            $fullPath = storage_path('app/public/' . $uploadedPath);
+            $fullPath = Storage::disk('public')->path($uploadedPath);
             $originalName = $file->getClientOriginalName();
-            $fileNames[] = $originalName;
 
             $httpRequest->attach(
-                "files[$i]",
+                'files[]',
                 file_get_contents($fullPath),
-                $originalName
+                $originalName,
+                ['Content-Type' => 'application/pdf']
             );
         }
 
         try {
-            $response = $httpRequest->post('https://safa.masar-soft.com/api/v1/read-cf');
+            $response = $httpRequest->post(config('services.f24_ocr.url'));
 
             if (!$response->successful()) {
                 return response()->json([
@@ -52,9 +56,20 @@ class SendInvoiceController extends Controller
                 ], $response->status());
             }
 
+            $results = $response->json();
+
+            if (! is_array($results) || ! array_is_list($results)
+                || count($results) !== count($request->file('files'))
+                || collect($results)->contains(fn ($result) => ! is_array($result)
+                    || ! isset($result['file']) || ! is_bool($result['success'] ?? null))) {
+                return response()->json(['error' => 'Invalid response from F24 OCR service'], 502);
+            }
+
+            $hasErrors = collect($results)->contains(fn ($result) => $result['success'] === false);
+
             return response()->json([
-                'message' => 'All files processed successfully',
-                'results' => $response->json(),
+                'message' => $hasErrors ? 'Some files could not be processed' : 'All files processed successfully',
+                'results' => $results,
             ]);
         } catch (\Exception $e) {
             return response()->json([
