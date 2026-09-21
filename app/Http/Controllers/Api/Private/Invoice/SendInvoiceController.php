@@ -6,14 +6,18 @@ use App\Http\Controllers\Controller;
 use App\Models\Client\Client;
 use App\Services\Upload\UploadService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Mail;
-use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
-
 
 class SendInvoiceController extends Controller
 {
+    private const OCR_URL =
+        'https://f24-ocr.elmotechsoft.online/read-cf';
+
+    private const OCR_API_KEY =
+        'cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d';
+
     protected $uploadService;
 
     public function __construct(UploadService $uploadService)
@@ -23,149 +27,303 @@ class SendInvoiceController extends Controller
 
     public function index(Request $request)
     {
+        /*
+        |--------------------------------------------------------------------------
+        | Validate files
+        |--------------------------------------------------------------------------
+        */
+
         $request->validate([
             'files' => 'required|array|min:1',
-            'files.*' => 'required|mimes:pdf|max:10240',
+            'files.*' => 'required|file|mimes:pdf|max:10240',
         ]);
 
-        $httpRequest = Http::acceptJson()->asMultipart()
-            ->withHeaders(['X-API-Key' => 'cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d'])
-            ->connectTimeout(10)
-            ->timeout((int) config('services.f24_ocr.timeout', 120));
+        $files = $request->file('files');
 
-        foreach ($request->file('files') as $file) {
-            $uploadedPath = $this->uploadService->uploadFile($file, 'uploadedInvoices');
-            $fullPath = Storage::disk('public')->path($uploadedPath);
+        /*
+        |--------------------------------------------------------------------------
+        | Prepare HTTP request
+        |--------------------------------------------------------------------------
+        */
+
+        $httpRequest = Http::acceptJson()
+            ->asMultipart()
+            ->withHeaders([
+                'X-API-Key' => self::OCR_API_KEY,
+            ])
+            ->connectTimeout(10)
+            ->timeout(120);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Store local files
+        |--------------------------------------------------------------------------
+        */
+
+        $uploadedFiles = [];
+
+        foreach ($files as $file) {
+
+            $uploadedPath = $this->uploadService->uploadFile(
+                $file,
+                'uploadedInvoices'
+            );
+
+            $fullPath = Storage::disk('public')->path(
+                $uploadedPath
+            );
+
             $originalName = $file->getClientOriginalName();
+
+            $uploadedFiles[] = [
+                'name' => $originalName,
+                'path' => $fullPath,
+                'storage_path' => $uploadedPath,
+            ];
+
+            /*
+            |--------------------------------------------------------------------------
+            | Attach PDF to Python request
+            |--------------------------------------------------------------------------
+            */
 
             $httpRequest->attach(
                 'files[]',
                 file_get_contents($fullPath),
                 $originalName,
-                ['Content-Type' => 'application/pdf']
+                [
+                    'Content-Type' => 'application/pdf',
+                ]
             );
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | Send files to Python OCR API
+        |--------------------------------------------------------------------------
+        */
+
         try {
-            $response = $httpRequest->post(config('services.f24_ocr.url'));
 
-            if (!$response->successful()) {
-                return response()->json([
-                    'error' => 'Failed to process files on remote server',
-                    'details' => $response->body(),
-                ], $response->status());
-            }
+            $response = $httpRequest->post(
+                self::OCR_URL
+            );
 
-            $results = $response->json();
+        } catch (\Throwable $e) {
 
-            if (! is_array($results) || ! array_is_list($results)
-                || count($results) !== count($request->file('files'))
-                || collect($results)->contains(fn ($result) => ! is_array($result)
-                    || ! isset($result['file']) || ! is_bool($result['success'] ?? null))) {
-                return response()->json(['error' => 'Invalid response from F24 OCR service'], 502);
-            }
-
-            $hasErrors = collect($results)->contains(fn ($result) => $result['success'] === false);
-
-            return response()->json([
-                'message' => $hasErrors ? 'Some files could not be processed' : 'All files processed successfully',
-                'results' => $results,
-            ]);
-        } catch (\Exception $e) {
             return response()->json([
                 'error' => 'Connection error',
                 'details' => $e->getMessage(),
             ], 500);
         }
-    }
 
+        /*
+        |--------------------------------------------------------------------------
+        | Check remote response
+        |--------------------------------------------------------------------------
+        */
 
+        if (! $response->successful()) {
 
-   /* public function index(Request $request)
-{
-    $request->validate([
-        'files.*' => 'required|mimes:pdf|max:10240',
-    ]);
-
-    $results = [];
-
-    foreach ($request->file('files') as $uploaded) {
-        $uploadedFile = $this->uploadService->uploadFile($uploaded, 'uploadedInvoices');
-        $pdfPath = storage_path('app/public/' . $uploadedFile);
-
-        try {
-            $pythonScript = base_path('app/Http/Controllers/Api/Private/Invoice/image_pro.py');
-
-            // Choose appropriate python command based on OS
-            $pythonPath = PHP_OS_FAMILY === 'Windows' ? 'C:\\Python312\\python.exe' : 'python3';
-
-            $command = [$pythonPath, $pythonScript, $pdfPath];
-            $process = Process::run($command);
-
-            if ($process->failed()) {
-                $results[] = [
-                    'file' => $uploaded->getClientOriginalName(),
-                    'error' => 'Python script failed',
-                    'stderr' => $process->errorOutput(),
-                    'stdout' => $process->output(),
-                ];
-
-                continue;
-            }
-
-            $stdout = trim($process->output());
-
-            $cfData = json_decode($stdout, true);
-
-
-            if (!isset($cfData['cf']) || !$cfData['cf']) {
-
-                $results[] = [
-                    'file' => $uploaded->getClientOriginalName(),
-                    'codice_fiscale' => $cfData,
-                    'status' => 'processed',
-                ];
-
-                continue;
-            }
-
-
-            $client = Client::where('cf', $cfData['cf'])->first();
-            if ($client) {
-                $this->sendInvoiceToClient($client->email, $pdfPath);
-            }
-
-            $results[] = [
-                'file' => $uploaded->getClientOriginalName(),
-                'codice_fiscale' => $cfData['cf'],
-                'status' => 'processed',
-            ];
-        } catch (\Exception $e) {
-            $results[] = [
-                'file' => $uploaded->getClientOriginalName(),
-                'error' => $e->getMessage()
-            ];
+            return response()->json([
+                'error' => 'Failed to process files on remote server',
+                'status' => $response->status(),
+                'details' => $response->body(),
+            ], $response->status());
         }
-    }
 
-    return response()->json([
-        'message' => 'All files processed',
-        'results' => $results
-    ]);
-}*/
+        $ocrResults = $response->json();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validate Python response
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            ! is_array($ocrResults)
+            || count($ocrResults) !== count($uploadedFiles)
+        ) {
+
+            return response()->json([
+                'error' => 'Invalid response from F24 OCR service',
+                'ocr_response' => $ocrResults,
+            ], 502);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Process each OCR result
+        |--------------------------------------------------------------------------
+        */
+
+        $results = [];
+
+        foreach ($ocrResults as $index => $ocrResult) {
+
+            $uploadedFile = $uploadedFiles[$index];
+
+            $result = [
+                'file' => $uploadedFile['name'],
+                'success' => $ocrResult['success'] ?? false,
+                'cf' => $ocrResult['cf'] ?? null,
+                'status' => $ocrResult['status'] ?? null,
+            ];
+
+            /*
+            |--------------------------------------------------------------------------
+            | OCR failed
+            |--------------------------------------------------------------------------
+            */
+
+            if (($ocrResult['success'] ?? false) === false) {
+
+                $result['error'] =
+                    $ocrResult['error']
+                    ?? 'Unable to process PDF';
+
+                $results[] = $result;
+
+                continue;
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Codice Fiscale not found
+            |--------------------------------------------------------------------------
+            */
+
+            $cf = $ocrResult['cf'] ?? null;
+
+            if (! $cf) {
+
+                $result['message'] =
+                    $ocrResult['message']
+                    ?? 'Codice Fiscale not found';
+
+                $result['client_found'] = false;
+                $result['email_sent'] = false;
+
+                $results[] = $result;
+
+                continue;
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Find client
+            |--------------------------------------------------------------------------
+            */
+
+            $client = Client::where('cf', $cf)->first();
+
+            if (! $client) {
+
+                $result['client_found'] = false;
+                $result['email_sent'] = false;
+                $result['message'] =
+                    'Client not found for this Codice Fiscale';
+
+                $results[] = $result;
+
+                continue;
+            }
+
+            $result['client_found'] = true;
+
+            /*
+            |--------------------------------------------------------------------------
+            | Check client email
+            |--------------------------------------------------------------------------
+            */
+
+            if (! $client->email) {
+
+                $result['email_sent'] = false;
+                $result['message'] =
+                    'Client found but email is missing';
+
+                $results[] = $result;
+
+                continue;
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Send invoice email
+            |--------------------------------------------------------------------------
+            */
+
+            try {
+
+                $this->sendInvoiceToClient(
+                    $client->email,
+                    $uploadedFile['path'],
+                    $uploadedFile['name']
+                );
+
+                $result['email_sent'] = true;
+                $result['email'] = $client->email;
+
+            } catch (\Throwable $e) {
+
+                $result['email_sent'] = false;
+                $result['email_error'] = $e->getMessage();
+            }
+
+            $results[] = $result;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Final response
+        |--------------------------------------------------------------------------
+        */
+
+        $hasErrors = collect($results)->contains(
+            function ($result) {
+                return
+                    ($result['success'] ?? false) === false
+                    || ($result['cf'] ?? null) === null
+                    || ($result['client_found'] ?? false) === false
+                    || ($result['email_sent'] ?? false) === false;
+            }
+        );
+
+        return response()->json([
+            'message' => $hasErrors
+                ? 'Files processed with some warnings'
+                : 'All files processed successfully',
+            'results' => $results,
+        ]);
+    }
 
     /**
-     * Send the extracted invoice PDF to the client.
+     * Send invoice PDF to client.
      */
-    private function sendInvoiceToClient($email, $pdfPath)
-    {
-        Mail::raw('Here is your invoice.', function ($message) use ($email, $pdfPath) {
-            $message->to($email)
-                ->subject('Your Invoice')
-                ->attach($pdfPath, [
-                    'as' => 'invoice.pdf',
-                    'mime' => 'application/pdf',
-                ]);
-        });
+    private function sendInvoiceToClient(
+        string $email,
+        string $pdfPath,
+        string $fileName
+    ): void {
+        Mail::raw(
+            'Here is your invoice.',
+            function ($message) use (
+                $email,
+                $pdfPath,
+                $fileName
+            ) {
+                $message
+                    ->to($email)
+                    ->subject('Your Invoice')
+                    ->attach(
+                        $pdfPath,
+                        [
+                            'as' => $fileName,
+                            'mime' => 'application/pdf',
+                        ]
+                    );
+            }
+        );
     }
 }
