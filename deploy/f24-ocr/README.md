@@ -61,7 +61,8 @@ and invalid files are reported independently.
 Laravel checks each CF against clients, groups the valid invoices by normalized
 CF across all files in the request, and sends **one email per client** with a
 separate PDF attachment for every invoice. Different clients remain in separate
-emails even though all emails go to the test address `mr10dev10@gmail.com`. Client
+emails even though all emails go to the test addresses `mr10dev10@gmail.com`
+and `mohamedelhaddad997@gmail.com`. Client
 email addresses are not used. Unknown clients and failed pages are skipped;
 valid invoices still send. A mail failure is reported on every invoice in that
 client's email without blocking other clients. API `results` include source filename, zero-based `file_index`,
@@ -84,8 +85,8 @@ is `Servizio F24`, using the existing configured sender email address. This
 override applies only to F24 emails. If the first invoice's date is missing,
 the body says `La data di scadenza non è disponibile.` and the subject is
 `Invio modelli F24`; later dates are not substituted. The API still exposes
-`invoice_number` and ISO `due_date` for each invoice. The sole test recipient
-remains `mr10dev10@gmail.com`.
+`invoice_number` and ISO `due_date` for each invoice. The test recipients are
+`mr10dev10@gmail.com` and `mohamedelhaddad997@gmail.com`.
 
 Email grouping is implemented in `SendInvoiceController.php`; changing this
 grouping does not require rebuilding the Python container.

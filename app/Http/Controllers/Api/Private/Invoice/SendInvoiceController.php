@@ -18,6 +18,7 @@ class SendInvoiceController extends Controller
 
     private const TEMP_EMAILS = [
         'mr10dev10@gmail.com',
+        'mohamedelhaddad997@gmail.com',
     ];
 
     public function index(Request $request)

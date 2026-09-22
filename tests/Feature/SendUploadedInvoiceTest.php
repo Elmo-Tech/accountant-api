@@ -71,7 +71,7 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertCount(2, $this->sent);
         $invoiceIndexesByEmail = [[0, 2, 3], [1]];
         foreach ($this->sent as $index => $email) {
-            $this->assertSame(['mr10dev10@gmail.com'],
+            $this->assertSame(['mr10dev10@gmail.com', 'mohamedelhaddad997@gmail.com'],
                 array_map(fn ($address) => $address->getAddress(), $email->getTo()));
             $this->assertCount(count($invoiceIndexesByEmail[$index]), $email->getAttachments());
             $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.", $email->getTextBody());
