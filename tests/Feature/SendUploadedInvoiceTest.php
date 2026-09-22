@@ -18,6 +18,7 @@ class SendUploadedInvoiceTest extends TestCase
     {
         parent::setUp();
         $this->withoutMiddleware();
+        config(['mail.from.address' => 'billing@example.test', 'mail.from.name' => 'Laravel']);
         config(['database.default' => 'sqlite', 'database.connections.sqlite.database' => ':memory:']);
         DB::purge('sqlite');
         DB::statement('CREATE TABLE clients (id INTEGER PRIMARY KEY, cf TEXT, deleted_at TEXT)');
@@ -73,17 +74,18 @@ class SendUploadedInvoiceTest extends TestCase
             $this->assertSame(['mr10dev10@gmail.com'],
                 array_map(fn ($address) => $address->getAddress(), $email->getTo()));
             $this->assertCount(count($invoiceIndexesByEmail[$index]), $email->getAttachments());
+            $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.", $email->getTextBody());
+            $this->assertSame('Modelli F24 in scadenza - 30/09/2026', $email->getSubject());
+            $this->assertSame('Servizio F24', $email->getFrom()[0]->getName());
+            $this->assertSame('billing@example.test', $email->getFrom()[0]->getAddress());
             foreach ($invoiceIndexesByEmail[$index] as $attachmentIndex => $invoiceIndex) {
                 $response->assertJsonPath('results.'.$invoiceIndex.'.email_sent', true);
                 $attachment = $email->getAttachments()[$attachmentIndex];
                 $this->assertSame(base64_decode($invoices[$invoiceIndex]['pdf_base64']), $attachment->getBody());
                 $this->assertSame('batch_file_1_page_'.($invoiceIndex + 1).'.pdf', $attachment->getFilename());
-                $this->assertStringContainsString('Fattura n. '.(77 + $invoiceIndex).' - Scadenza: 30/09/2026'."\n".'Allegato: '.$attachment->getFilename(), $email->getTextBody());
             }
         }
         $this->assertStringNotContainsString('pdf_base64', $response->getContent());
-        $this->assertStringNotContainsString('Fattura n. 78', $this->sent[0]->getTextBody());
-        $this->assertStringNotContainsString('Fattura n. 77', $this->sent[1]->getTextBody());
     }
 
     public function test_missing_unknown_and_invalid_pages_are_skipped_without_stopping_valid_pages(): void
@@ -165,17 +167,21 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertSame('batch_file_2_page_1.pdf', $attachments[1]->getFilename());
     }
 
-    public function test_each_invoice_keeps_its_own_due_date_in_grouped_email(): void
+    public function test_five_attachments_use_only_first_invoice_date_in_email_and_keep_api_dates(): void
     {
-        $first = $this->invoice(1);
-        $second = array_merge($this->invoice(2), ['due_date' => '2026-10-31']);
-        $this->upload([['success' => true, 'page_count' => 2, 'invoices' => [$first, $second]]])
+        $dates = ['2026-09-30', '2026-10-31', '2026-09-01', '2026-12-01', '2027-01-01'];
+        $invoices = [];
+        foreach ($dates as $index => $date) {
+            $invoices[] = array_merge($this->invoice($index + 1), ['due_date' => $date]);
+        }
+        $this->upload([['success' => true, 'page_count' => 5, 'invoices' => $invoices]])
             ->assertOk()->assertJsonPath('results.0.invoice_number', '77')
             ->assertJsonPath('results.0.due_date', '2026-09-30')
             ->assertJsonPath('results.1.due_date', '2026-10-31');
         $this->assertCount(1, $this->sent);
-        $this->assertStringContainsString('Fattura n. 77 - Scadenza: 30/09/2026', $this->sent[0]->getTextBody());
-        $this->assertStringContainsString('Fattura n. 78 - Scadenza: 31/10/2026', $this->sent[0]->getTextBody());
+        $this->assertCount(5, $this->sent[0]->getAttachments());
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.", $this->sent[0]->getTextBody());
+        $this->assertSame('Modelli F24 in scadenza - 30/09/2026', $this->sent[0]->getSubject());
     }
 
     public function test_missing_or_invalid_reference_is_explicit_without_inventing_a_due_date(): void
@@ -183,14 +189,32 @@ class SendUploadedInvoiceTest extends TestCase
         $missing = $this->invoice(1);
         unset($missing['due_date'], $missing['invoice_number']);
         $invalid = array_merge($this->invoice(2), ['due_date' => '2026-02-31']);
-        $this->upload([['success' => true, 'page_count' => 2, 'invoices' => [$missing, $invalid]]])
+        $valid = array_merge($this->invoice(3), ['due_date' => '2026-10-31']);
+        $this->upload([['success' => true, 'page_count' => 3, 'invoices' => [$missing, $invalid, $valid]]])
             ->assertOk()->assertJsonPath('message', 'Files processed with some warnings')
             ->assertJsonPath('results.0.email_sent', true)
             ->assertJsonPath('results.0.due_date', null)
             ->assertJsonPath('results.1.due_date', null);
         $body = $this->sent[0]->getTextBody();
-        $this->assertStringContainsString('Fattura n. non disponibile - Scadenza: non disponibile', $body);
-        $this->assertStringContainsString('Fattura n. 78 - Scadenza: non disponibile', $body);
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24. La data di scadenza non è disponibile.", $body);
+        $this->assertSame('Invio modelli F24', $this->sent[0]->getSubject());
+        $this->assertCount(3, $this->sent[0]->getAttachments());
+    }
+
+    public function test_each_client_uses_its_own_first_date_even_across_uploads(): void
+    {
+        $this->upload([
+            ['success' => true, 'page_count' => 2, 'invoices' => [
+                $this->invoice(1),
+                array_merge($this->invoice(2, 'RSSMRA80A01H501U'), ['due_date' => '2026-10-31']),
+            ]],
+            ['success' => true, 'page_count' => 1, 'invoices' => [
+                array_merge($this->invoice(1), ['due_date' => '2026-08-01']),
+            ]],
+        ], 2)->assertOk();
+        $this->assertCount(2, $this->sent);
         $this->assertCount(2, $this->sent[0]->getAttachments());
+        $this->assertSame('Modelli F24 in scadenza - 30/09/2026', $this->sent[0]->getSubject());
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 31/10/2026.", $this->sent[1]->getTextBody());
     }
 }

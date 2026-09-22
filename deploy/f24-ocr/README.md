@@ -68,11 +68,24 @@ client's email without blocking other clients. API `results` include source file
 page number, and sending outcome, without PDF/base64 data. The original batch
 is never used as an attachment.
 
-Each email lists `Fattura n. 77 - Scadenza: 30/09/2026` next to the corresponding
-attachment filename, using each invoice's own date. Unavailable values are
-shown as `non disponibile`, with a warning in the API response. The API exposes
-`invoice_number` and ISO `due_date` per invoice. The sole test recipient remains
-`mr10dev10@gmail.com`.
+The Dockerfile is the user-supplied version, with its embedded Python mirrored
+in `image_pro.py`. The email uses only the first attached invoice's date for
+that client, in upload/page order (not the earliest date). All PDFs remain
+attached separately. The message is:
+
+```text
+Gentile Cliente,
+
+in allegato il modello F24 in scadenza il 30/09/2026.
+```
+
+The subject is `Modelli F24 in scadenza - 30/09/2026` and the sender display name
+is `Servizio F24`, using the existing configured sender email address. This
+override applies only to F24 emails. If the first invoice's date is missing,
+the body says `La data di scadenza non è disponibile.` and the subject is
+`Invio modelli F24`; later dates are not substituted. The API still exposes
+`invoice_number` and ISO `due_date` for each invoice. The sole test recipient
+remains `mr10dev10@gmail.com`.
 
 Email grouping is implemented in `SendInvoiceController.php`; changing this
 grouping does not require rebuilding the Python container.

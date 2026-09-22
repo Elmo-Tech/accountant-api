@@ -46,7 +46,7 @@ class F24OcrTest(unittest.TestCase):
         self.addCleanup(self.key_patch.stop)
         # Existing OCR tests exercise the scanned-document fallback without
         # requiring a local Poppler installation.
-        self.text_patch = patch.object(ocr, 'read_text_pages', side_effect=lambda path, count: [''] * count)
+        self.text_patch = patch.object(ocr, 'read_pdf_text_pages', side_effect=lambda path, count: [''] * count)
         self.text_patch.start()
         self.addCleanup(self.text_patch.stop)
 
@@ -56,7 +56,7 @@ class F24OcrTest(unittest.TestCase):
     def test_repeated_client_and_other_client_get_independent_original_pages(self):
         texts = ['invoice A', 'invoice B', 'invoice C', 'invoice D']
         codes = ['LHDMMD97T01Z336N', 'RSSMRA80A01H501U', 'LHDMMD97T01Z336N', 'LHDMMD97T01Z336N']
-        with patch.object(ocr, 'read_page_text', side_effect=['CODICE FISCALE ' + code for code in codes]) as read:
+        with patch.object(ocr, 'read_page_ocr_text', side_effect=['CODICE FISCALE ' + code for code in codes]) as read:
             response = self.upload([('files[]', ('batch.pdf', pdf_pages(texts), 'application/pdf'))])
         self.assertEqual(response.status_code, 200)
         result = response.json()[0]
@@ -70,7 +70,7 @@ class F24OcrTest(unittest.TestCase):
             self.assertEqual(split.pages[0].extract_text(), texts[index])
 
     def test_missing_cf_and_ocr_errors_do_not_inherit_previous_cf_or_stop_batch(self):
-        with patch.object(ocr, 'read_page_text', side_effect=['CODICE FISCALE LHDMMD97T01Z336N', '', RuntimeError('OCR timeout'), 'CODICE FISCALE RSSMRA80A01H501U']):
+        with patch.object(ocr, 'read_page_ocr_text', side_effect=['CODICE FISCALE LHDMMD97T01Z336N', '', RuntimeError('OCR timeout'), 'CODICE FISCALE RSSMRA80A01H501U']):
             with self.assertLogs('uvicorn.error', level='ERROR'):
                 result = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b', 'c', 'd']), 'application/pdf'))]).json()[0]
         self.assertEqual(result['invoices'][1]['status'], 'not_found')
@@ -80,7 +80,7 @@ class F24OcrTest(unittest.TestCase):
         self.assertTrue(result['invoices'][3]['success'])
 
     def test_bad_file_does_not_stop_next_upload_with_same_name(self):
-        with patch.object(ocr, 'read_page_text', return_value='CODICE FISCALE LHDMMD97T01Z336N'):
+        with patch.object(ocr, 'read_page_ocr_text', return_value='CODICE FISCALE LHDMMD97T01Z336N'):
             result = self.upload([
                 ('files[]', ('batch.pdf', b'', 'application/pdf')),
                 ('files[]', ('batch.pdf', pdf_pages(['second']), 'application/pdf')),
@@ -90,7 +90,7 @@ class F24OcrTest(unittest.TestCase):
         self.assertEqual(result[1]['page_count'], 1)
 
     def test_health_auth_mime_and_file_size_validation(self):
-        self.assertEqual(self.client.get('/health').json(), {'status': 'ok'})
+        self.assertEqual(self.client.get('/health').json(), {'status': 'ok', 'version': '3.2.0'})
         file = [('files[]', ('test.pdf', b'bad pdf', 'application/pdf'))]
         self.assertEqual(self.client.post('/read-cf', files=file).status_code, 401)
         with patch.object(ocr, 'API_KEY', ''):
@@ -117,7 +117,7 @@ class F24OcrTest(unittest.TestCase):
         self.text_patch.stop()
         text = 'CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77\fCODICE FISCALE RSSMRA80A01H501U\nRiferimento:01/10/2026/78\fCODICE FISCALE LHDMMD97T01Z336N\nRiferimento:02/10/2026/79\f'
         with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=text.encode())):
-            with patch.object(ocr, 'read_page_text', side_effect=AssertionError('Unexpected OCR')):
+            with patch.object(ocr, 'read_page_ocr_text', side_effect=AssertionError('Unexpected OCR')):
                 result = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b', 'c']), 'application/pdf'))]).json()[0]
         self.assertEqual([i['cf'] for i in result['invoices']], ['LHDMMD97T01Z336N', 'RSSMRA80A01H501U', 'LHDMMD97T01Z336N'])
         self.assertTrue(all(i['success'] and 'pdf_base64' in i for i in result['invoices']))
@@ -137,7 +137,7 @@ class F24OcrTest(unittest.TestCase):
                          {'due_date': None, 'invoice_number': None})
 
     def test_scanned_page_extracts_reference_and_cf_from_same_ocr_pass(self):
-        with patch.object(ocr, 'read_page_text', return_value='CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77') as read:
+        with patch.object(ocr, 'read_page_ocr_text', return_value='CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77') as read:
             invoice = self.upload([('files[]', ('batch.pdf', pdf_pages(['scanned']), 'application/pdf'))]).json()[0]['invoices'][0]
         self.assertEqual(invoice['invoice_number'], '77')
         self.assertEqual(invoice['due_date'], '2026-09-30')
@@ -149,7 +149,7 @@ class F24OcrTest(unittest.TestCase):
             with patch.object(ocr.pytesseract, 'image_to_string', side_effect=[
                 'CODICE FISCALE LHDMMD97T01Z336N', 'Riferimento:30/09/2026/77',
             ]) as read:
-                text = ocr.read_page_text('batch.pdf', 1)
+                text = ocr.read_page_ocr_text('batch.pdf', 1)
         render.assert_called_once()
         self.assertEqual(read.call_count, 2)
         self.assertEqual(ocr.extract_reference(text), {'due_date': '2026-09-30', 'invoice_number': '77'})
@@ -158,7 +158,7 @@ class F24OcrTest(unittest.TestCase):
         self.text_patch.stop()
         text = 'CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77\fCODICE FISCALE LHDMMD97T01Z336N\f'
         with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=text.encode())):
-            with patch.object(ocr, 'read_page_text', return_value=''):
+            with patch.object(ocr, 'read_page_ocr_text', return_value=''):
                 invoices = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b']), 'application/pdf'))]).json()[0]['invoices']
         self.assertTrue(invoices[1]['success'])
         self.assertIn('pdf_base64', invoices[1])
@@ -169,13 +169,13 @@ class F24OcrTest(unittest.TestCase):
     def test_incomplete_text_output_never_assigns_cf_to_wrong_page(self):
         self.text_patch.stop()
         with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=b'CODICE FISCALE LHDMMD97T01Z336N\f')):
-            self.assertEqual(ocr.read_text_pages('batch.pdf', 2), ['', ''])
+            self.assertEqual(ocr.read_pdf_text_pages('batch.pdf', 2), ['', ''])
 
     def test_text_extractor_timeout_falls_back_to_ocr(self):
         self.text_patch.stop()
         with patch.object(ocr.subprocess, 'run', side_effect=subprocess.TimeoutExpired('pdftotext', 30)):
             with self.assertLogs('uvicorn.error', level='WARNING'):
-                self.assertEqual(ocr.read_text_pages('batch.pdf', 2), ['', ''])
+                self.assertEqual(ocr.read_pdf_text_pages('batch.pdf', 2), ['', ''])
 
 
 if __name__ == '__main__':

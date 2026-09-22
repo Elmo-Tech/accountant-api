@@ -181,19 +181,21 @@ class SendInvoiceController extends Controller
 
     private function sendInvoicesToTemporaryEmails(array $attachments): void
     {
-        $lines = ['In allegato le fatture:', ''];
-        foreach ($attachments as $attachment) {
-            $number = $attachment['invoice_number'] ?? 'non disponibile';
-            $dueDate = $attachment['due_date']
-                ? \DateTimeImmutable::createFromFormat('!Y-m-d', $attachment['due_date'])->format('d/m/Y')
-                : 'non disponibile';
-            $lines[] = 'Fattura n. '.$number.' - Scadenza: '.$dueDate;
-            $lines[] = 'Allegato: '.$attachment['name'];
-            $lines[] = '';
-        }
+        // Use the first attached invoice in upload/page order, not the earliest
+        // date or a date from a later invoice belonging to the same client.
+        $firstDueDate = $attachments[0]['due_date'] ?? null;
+        $dueDate = $firstDueDate
+            ? \DateTimeImmutable::createFromFormat('!Y-m-d', $firstDueDate)->format('d/m/Y')
+            : null;
+        $body = "Gentile Cliente,\n\nin allegato il modello F24";
+        $body .= $dueDate
+            ? ' in scadenza il '.$dueDate.'.'
+            : '. La data di scadenza non è disponibile.';
+        $subject = $dueDate ? 'Modelli F24 in scadenza - '.$dueDate : 'Invio modelli F24';
 
-        Mail::raw(implode("\n", $lines), function ($message) use ($attachments) {
-            $message->to(self::TEMP_EMAILS)->subject('Your Invoices');
+        Mail::raw($body, function ($message) use ($attachments, $subject) {
+            $message->from(config('mail.from.address'), 'Servizio F24')
+                ->to(self::TEMP_EMAILS)->subject($subject);
             foreach ($attachments as $attachment) {
                 $message->attachData($attachment['pdf'], $attachment['name'], ['mime' => 'application/pdf']);
             }
