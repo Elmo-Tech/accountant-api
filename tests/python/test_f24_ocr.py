@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 
@@ -55,7 +56,7 @@ class F24OcrTest(unittest.TestCase):
     def test_repeated_client_and_other_client_get_independent_original_pages(self):
         texts = ['invoice A', 'invoice B', 'invoice C', 'invoice D']
         codes = ['LHDMMD97T01Z336N', 'RSSMRA80A01H501U', 'LHDMMD97T01Z336N', 'LHDMMD97T01Z336N']
-        with patch.object(ocr, 'read_page_cf', side_effect=codes) as read:
+        with patch.object(ocr, 'read_page_text', side_effect=['CODICE FISCALE ' + code for code in codes]) as read:
             response = self.upload([('files[]', ('batch.pdf', pdf_pages(texts), 'application/pdf'))])
         self.assertEqual(response.status_code, 200)
         result = response.json()[0]
@@ -69,7 +70,7 @@ class F24OcrTest(unittest.TestCase):
             self.assertEqual(split.pages[0].extract_text(), texts[index])
 
     def test_missing_cf_and_ocr_errors_do_not_inherit_previous_cf_or_stop_batch(self):
-        with patch.object(ocr, 'read_page_cf', side_effect=['LHDMMD97T01Z336N', None, RuntimeError('OCR timeout'), 'RSSMRA80A01H501U']):
+        with patch.object(ocr, 'read_page_text', side_effect=['CODICE FISCALE LHDMMD97T01Z336N', '', RuntimeError('OCR timeout'), 'CODICE FISCALE RSSMRA80A01H501U']):
             with self.assertLogs('uvicorn.error', level='ERROR'):
                 result = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b', 'c', 'd']), 'application/pdf'))]).json()[0]
         self.assertEqual(result['invoices'][1]['status'], 'not_found')
@@ -79,7 +80,7 @@ class F24OcrTest(unittest.TestCase):
         self.assertTrue(result['invoices'][3]['success'])
 
     def test_bad_file_does_not_stop_next_upload_with_same_name(self):
-        with patch.object(ocr, 'read_page_cf', return_value='LHDMMD97T01Z336N'):
+        with patch.object(ocr, 'read_page_text', return_value='CODICE FISCALE LHDMMD97T01Z336N'):
             result = self.upload([
                 ('files[]', ('batch.pdf', b'', 'application/pdf')),
                 ('files[]', ('batch.pdf', pdf_pages(['second']), 'application/pdf')),
@@ -114,12 +115,56 @@ class F24OcrTest(unittest.TestCase):
 
     def test_text_batch_does_not_run_ocr_and_preserves_page_client_order(self):
         self.text_patch.stop()
-        text = 'CODICE FISCALE LHDMMD97T01Z336N\fCODICE FISCALE RSSMRA80A01H501U\fCODICE FISCALE LHDMMD97T01Z336N\f'
+        text = 'CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77\fCODICE FISCALE RSSMRA80A01H501U\nRiferimento:01/10/2026/78\fCODICE FISCALE LHDMMD97T01Z336N\nRiferimento:02/10/2026/79\f'
         with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=text.encode())):
-            with patch.object(ocr, 'read_page_cf', side_effect=AssertionError('Unexpected OCR')):
+            with patch.object(ocr, 'read_page_text', side_effect=AssertionError('Unexpected OCR')):
                 result = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b', 'c']), 'application/pdf'))]).json()[0]
         self.assertEqual([i['cf'] for i in result['invoices']], ['LHDMMD97T01Z336N', 'RSSMRA80A01H501U', 'LHDMMD97T01Z336N'])
         self.assertTrue(all(i['success'] and 'pdf_base64' in i for i in result['invoices']))
+        self.assertEqual([i['invoice_number'] for i in result['invoices']], ['77', '78', '79'])
+        self.assertEqual([i['due_date'] for i in result['invoices']], ['2026-09-30', '2026-10-01', '2026-10-02'])
+
+    def test_reference_parser_uses_footer_and_validates_dates(self):
+        self.assertEqual(ocr.extract_reference('periodo di riferimento: 2024\nRiferimento:30/09/2026/77'),
+                         {'due_date': '2026-09-30', 'invoice_number': '77'})
+        self.assertEqual(ocr.extract_reference('riferimento : 1 / 2 / 2028 / 007'),
+                         {'due_date': '2028-02-01', 'invoice_number': '007'})
+        self.assertIsNone(ocr.extract_reference('Riferimento:31/02/2026/77')['due_date'])
+        self.assertEqual(ocr.extract_reference('Riferimento:29/02/2028/77')['due_date'], '2028-02-29')
+        self.assertEqual(ocr.extract_reference('Data 30/09/2026 numero 77'), {'due_date': None, 'invoice_number': None})
+        self.assertIsNone(ocr.extract_reference('Riferimento:30/09/2026')['invoice_number'])
+        self.assertEqual(ocr.extract_reference('Riferimento:30/09/2026/77\nRiferimento:01/10/2026/78'),
+                         {'due_date': None, 'invoice_number': None})
+
+    def test_scanned_page_extracts_reference_and_cf_from_same_ocr_pass(self):
+        with patch.object(ocr, 'read_page_text', return_value='CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77') as read:
+            invoice = self.upload([('files[]', ('batch.pdf', pdf_pages(['scanned']), 'application/pdf'))]).json()[0]['invoices'][0]
+        self.assertEqual(invoice['invoice_number'], '77')
+        self.assertEqual(invoice['due_date'], '2026-09-30')
+        read.assert_called_once()
+
+    def test_footer_ocr_recovers_reference_without_rendering_page_again(self):
+        page = Image.new('RGB', (600, 840), 'white')
+        with patch.object(ocr, 'convert_from_path', return_value=[page]) as render:
+            with patch.object(ocr.pytesseract, 'image_to_string', side_effect=[
+                'CODICE FISCALE LHDMMD97T01Z336N', 'Riferimento:30/09/2026/77',
+            ]) as read:
+                text = ocr.read_page_text('batch.pdf', 1)
+        render.assert_called_once()
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(ocr.extract_reference(text), {'due_date': '2026-09-30', 'invoice_number': '77'})
+
+    def test_missing_reference_does_not_drop_recognized_invoice_or_inherit_previous_date(self):
+        self.text_patch.stop()
+        text = 'CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77\fCODICE FISCALE LHDMMD97T01Z336N\f'
+        with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=text.encode())):
+            with patch.object(ocr, 'read_page_text', return_value=''):
+                invoices = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b']), 'application/pdf'))]).json()[0]['invoices']
+        self.assertTrue(invoices[1]['success'])
+        self.assertIn('pdf_base64', invoices[1])
+        self.assertIsNone(invoices[1]['due_date'])
+        self.assertIsNone(invoices[1]['invoice_number'])
+        self.assertIn('metadata_warning', invoices[1])
 
     def test_incomplete_text_output_never_assigns_cf_to_wrong_page(self):
         self.text_patch.stop()

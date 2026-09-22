@@ -28,6 +28,7 @@ class SendUploadedInvoiceTest extends TestCase
         Http::preventStrayRequests();
         Mail::shouldReceive('raw')->andReturnUsing(function ($body, $callback) {
             $email = new Email;
+            $email->text($body);
             $callback(new Message($email));
             $this->sent[] = $email;
         });
@@ -46,6 +47,7 @@ class SendUploadedInvoiceTest extends TestCase
     private function invoice(int $page, string $cf = 'LHDMMD97T01Z336N'): array
     {
         return ['page' => $page, 'success' => true, 'cf' => $cf, 'status' => 'processed',
+            'invoice_number' => (string) (76 + $page), 'due_date' => '2026-09-30',
             'pdf_base64' => base64_encode($this->pdf('Invoice '.$page.' '.$cf))];
     }
 
@@ -76,9 +78,12 @@ class SendUploadedInvoiceTest extends TestCase
                 $attachment = $email->getAttachments()[$attachmentIndex];
                 $this->assertSame(base64_decode($invoices[$invoiceIndex]['pdf_base64']), $attachment->getBody());
                 $this->assertSame('batch_file_1_page_'.($invoiceIndex + 1).'.pdf', $attachment->getFilename());
+                $this->assertStringContainsString('Fattura n. '.(77 + $invoiceIndex).' - Scadenza: 30/09/2026'."\n".'Allegato: '.$attachment->getFilename(), $email->getTextBody());
             }
         }
         $this->assertStringNotContainsString('pdf_base64', $response->getContent());
+        $this->assertStringNotContainsString('Fattura n. 78', $this->sent[0]->getTextBody());
+        $this->assertStringNotContainsString('Fattura n. 77', $this->sent[1]->getTextBody());
     }
 
     public function test_missing_unknown_and_invalid_pages_are_skipped_without_stopping_valid_pages(): void
@@ -158,5 +163,34 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertCount(2, $attachments);
         $this->assertSame('batch_file_1_page_1.pdf', $attachments[0]->getFilename());
         $this->assertSame('batch_file_2_page_1.pdf', $attachments[1]->getFilename());
+    }
+
+    public function test_each_invoice_keeps_its_own_due_date_in_grouped_email(): void
+    {
+        $first = $this->invoice(1);
+        $second = array_merge($this->invoice(2), ['due_date' => '2026-10-31']);
+        $this->upload([['success' => true, 'page_count' => 2, 'invoices' => [$first, $second]]])
+            ->assertOk()->assertJsonPath('results.0.invoice_number', '77')
+            ->assertJsonPath('results.0.due_date', '2026-09-30')
+            ->assertJsonPath('results.1.due_date', '2026-10-31');
+        $this->assertCount(1, $this->sent);
+        $this->assertStringContainsString('Fattura n. 77 - Scadenza: 30/09/2026', $this->sent[0]->getTextBody());
+        $this->assertStringContainsString('Fattura n. 78 - Scadenza: 31/10/2026', $this->sent[0]->getTextBody());
+    }
+
+    public function test_missing_or_invalid_reference_is_explicit_without_inventing_a_due_date(): void
+    {
+        $missing = $this->invoice(1);
+        unset($missing['due_date'], $missing['invoice_number']);
+        $invalid = array_merge($this->invoice(2), ['due_date' => '2026-02-31']);
+        $this->upload([['success' => true, 'page_count' => 2, 'invoices' => [$missing, $invalid]]])
+            ->assertOk()->assertJsonPath('message', 'Files processed with some warnings')
+            ->assertJsonPath('results.0.email_sent', true)
+            ->assertJsonPath('results.0.due_date', null)
+            ->assertJsonPath('results.1.due_date', null);
+        $body = $this->sent[0]->getTextBody();
+        $this->assertStringContainsString('Fattura n. non disponibile - Scadenza: non disponibile', $body);
+        $this->assertStringContainsString('Fattura n. 78 - Scadenza: non disponibile', $body);
+        $this->assertCount(2, $this->sent[0]->getAttachments());
     }
 }

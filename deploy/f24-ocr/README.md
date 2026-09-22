@@ -16,7 +16,7 @@ override it. The PHP controller and container must use the same key.
 For a local Docker build from the repository root:
 
 ```sh
-docker build -t f24-ocr:3.1 deploy/f24-ocr
+docker build -t f24-ocr:3.2 deploy/f24-ocr
 ```
 
 Deploy the changed `SendInvoiceController.php` together with the rebuilt
@@ -39,7 +39,18 @@ Version 3.1 reads the text layer first using Poppler's `pdftotext -layout`
 (already included in the image). Only pages without a recognized taxpayer CF
 use OCR. This avoids running 26 OCR operations for a 26-page text PDF. A failed
 text extraction or a page-count mismatch falls back to OCR without moving CFs
-between pages. `/openapi.json` reports version `3.1.0` after deployment.
+between pages. `/openapi.json` reports version `3.2.0` after deployment.
+
+Version 3.2 also extracts the footer `Riferimento:30/09/2026/77` as
+`due_date: "2026-09-30"` and `invoice_number: "77"`. As requested, the date in
+this reference is used as the due date. Only that labelled reference is used;
+tax periods, page numbers, and filenames are not substitutes. Invalid calendar
+dates and ambiguous references remain unavailable. OCR is attempted when the
+text layer lacks the CF, invoice number, or date. Each page is rendered once;
+a focused footer OCR pass is attempted if whole-page OCR misses the reference.
+Missing metadata is returned as null with `metadata_warning`; a readable CF
+and its PDF can still be sent. Update both the container and controller for
+this feature.
 
 The response remains an ordered array with one result per upload. Successful
 files contain `page_count` and an ordered `invoices` array, with one record per
@@ -56,6 +67,12 @@ valid invoices still send. A mail failure is reported on every invoice in that
 client's email without blocking other clients. API `results` include source filename, zero-based `file_index`,
 page number, and sending outcome, without PDF/base64 data. The original batch
 is never used as an attachment.
+
+Each email lists `Fattura n. 77 - Scadenza: 30/09/2026` next to the corresponding
+attachment filename, using each invoice's own date. Unavailable values are
+shown as `non disponibile`, with a warning in the API response. The API exposes
+`invoice_number` and ISO `due_date` per invoice. The sole test recipient remains
+`mr10dev10@gmail.com`.
 
 Email grouping is implemented in `SendInvoiceController.php`; changing this
 grouping does not require rebuilding the Python container.

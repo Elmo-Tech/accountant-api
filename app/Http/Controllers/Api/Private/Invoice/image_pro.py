@@ -1,5 +1,6 @@
 """F24 OCR API: one independent invoice PDF per page, including repeated CFs."""
 import base64
+from datetime import date
 from io import BytesIO
 import json
 import logging
@@ -16,7 +17,7 @@ from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from pdf2image import convert_from_path
 from pypdf import PdfReader, PdfWriter
 
-app = FastAPI(title="F24 Codice Fiscale Reader", version="3.1.0")
+app = FastAPI(title="F24 Codice Fiscale Reader", version="3.2.0")
 logger = logging.getLogger("uvicorn.error")
 API_KEY = os.getenv("API_KEY", "cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d")
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -36,7 +37,25 @@ def extract_cf(text: str) -> str | None:
     return re.sub(r"\s+", "", match.group("cf")) if match else None
 
 
-def read_page_cf(pdf_path: str, page_number: int) -> str | None:
+def extract_reference(text: str) -> dict:
+    # The user-defined due date and invoice number come from the footer only,
+    # not tax-period dates, page numbers, or the upload filename.
+    references = set()
+    for match in re.finditer(
+        r"\bRIFERIMENTO\s*:\s*(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(\d{4})"
+        r"(?!\d)(?:[ \t]*/[ \t]*(\d+)(?!\w))?", text, re.IGNORECASE,
+    ):
+        day, month, year, number = match.groups()
+        try:
+            due_date = date(int(year), int(month), int(day)).isoformat()
+        except ValueError:
+            due_date = None
+        references.add((due_date, number))
+    due_date, number = next(iter(references)) if len(references) == 1 else (None, None)
+    return {"due_date": due_date, "invoice_number": number}
+
+
+def read_page_text(pdf_path: str, page_number: int) -> str:
     # Render only the current page, as in the original container implementation.
     if os.getenv("TESSERACT_CMD"):
         pytesseract.pytesseract.tesseract_cmd = os.environ["TESSERACT_CMD"]
@@ -45,8 +64,19 @@ def read_page_cf(pdf_path: str, page_number: int) -> str | None:
         thread_count=1, timeout=60, poppler_path=os.getenv("POPPLER_PATH"),
     )
     try:
-        text = pytesseract.image_to_string(pages[0], lang=os.getenv("OCR_LANG", "ita+eng"), timeout=60)
-        return extract_cf(text)
+        language = os.getenv("OCR_LANG", "ita+eng")
+        text = pytesseract.image_to_string(pages[0], lang=language, timeout=60)
+        if not all(extract_reference(text).values()):
+            # The reference is small and can be missed during whole-page OCR.
+            # Reuse the rendered image for a focused footer pass.
+            page = pages[0]
+            try:
+                with page.crop((0, int(page.height * 0.88), page.width, page.height)) as footer:
+                    footer_text = pytesseract.image_to_string(footer, lang=language, config="--psm 11", timeout=60)
+                    text += "\n" + footer_text
+            except Exception:
+                logger.warning("F24 footer OCR unavailable on page %s", page_number)
+        return text
     finally:
         for page in pages:
             page.close()
@@ -87,11 +117,27 @@ def process_pdf(pdf_path: str, filename: str) -> dict:
             text_pages = read_text_pages(pdf_path, page_count)
             invoices = []
             for page_number in range(1, page_count + 1):
-                invoice = {"page": page_number, "success": False, "cf": None, "status": "error"}
+                invoice = {"page": page_number, "success": False, "cf": None, "status": "error",
+                           "due_date": None, "invoice_number": None}
                 try:
-                    cf = extract_cf(text_pages[page_number - 1])
-                    if not cf:
-                        cf = read_page_cf(pdf_path, page_number)
+                    text = text_pages[page_number - 1]
+                    cf = extract_cf(text)
+                    reference = extract_reference(text)
+                    if not cf or not all(reference.values()):
+                        try:
+                            ocr_text = read_page_text(pdf_path, page_number)
+                            cf = cf or extract_cf(ocr_text)
+                            ocr_reference = extract_reference(ocr_text)
+                            # Supplement partial references only when known values agree.
+                            if all(not value or value == ocr_reference[key] for key, value in reference.items()):
+                                reference = {key: value or ocr_reference[key] for key, value in reference.items()}
+                        except Exception:
+                            if not cf:
+                                raise
+                            logger.warning("F24 reference OCR failed on page %s", page_number)
+                    invoice.update(reference)
+                    if not all(reference.values()):
+                        invoice["metadata_warning"] = "Invoice number or due date could not be read from Riferimento"
                     invoice.update(success=True, cf=cf, status="processed" if cf else "not_found")
                     if cf:
                         # Copy the original page, preserving its appearance and

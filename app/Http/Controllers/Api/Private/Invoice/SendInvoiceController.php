@@ -81,7 +81,17 @@ class SendInvoiceController extends Controller
                     'file' => $originalName, 'file_index' => $index, 'page' => $invoice['page'],
                     'success' => $invoice['success'], 'cf' => $invoice['cf'] ?? null,
                     'status' => $invoice['status'] ?? null, 'client_found' => false, 'email_sent' => false,
+                    'invoice_number' => null, 'due_date' => null,
                 ];
+                $number = $invoice['invoice_number'] ?? null;
+                $date = $invoice['due_date'] ?? null;
+                $parsedDate = is_string($date) && preg_match('/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/D', $date)
+                    ? \DateTimeImmutable::createFromFormat('!Y-m-d', $date) : false;
+                $result['invoice_number'] = is_string($number) && preg_match('/^[0-9]+$/D', $number) ? $number : null;
+                $result['due_date'] = $parsedDate && $parsedDate->format('Y-m-d') === $date ? $date : null;
+                if ($result['invoice_number'] === null || $result['due_date'] === null) {
+                    $result['metadata_warning'] = 'Invoice number or due date could not be read from Riferimento';
+                }
                 if (! $invoice['success']) {
                     $result['error'] = $invoice['error'] ?? 'Unable to process PDF page';
                 } elseif (empty($invoice['cf'])) {
@@ -101,7 +111,10 @@ class SendInvoiceController extends Controller
                         $fileName = $stem.'_file_'.($index + 1).'_page_'.$invoice['page'].'.pdf';
                         $result['invoice_file'] = $fileName;
                         $groupKey = 'cf:'.$cf;
-                        $clientEmails[$groupKey]['attachments'][] = ['pdf' => $pdf, 'name' => $fileName];
+                        $clientEmails[$groupKey]['attachments'][] = [
+                            'pdf' => $pdf, 'name' => $fileName,
+                            'invoice_number' => $result['invoice_number'], 'due_date' => $result['due_date'],
+                        ];
                         $clientEmails[$groupKey]['result_indexes'][] = count($results);
                     }
                 }
@@ -125,7 +138,7 @@ class SendInvoiceController extends Controller
             }
         }
 
-        $hasWarnings = collect($results)->contains(fn ($result) => ! $result['email_sent']);
+        $hasWarnings = collect($results)->contains(fn ($result) => ! $result['email_sent'] || isset($result['metadata_warning']));
 
         return response()->json([
             'message' => $hasWarnings ? 'Files processed with some warnings' : 'All files processed successfully',
@@ -155,6 +168,8 @@ class SendInvoiceController extends Controller
                 if (! is_array($invoice) || ($invoice['page'] ?? null) !== $index + 1
                     || ! isset($invoice['success']) || ! is_bool($invoice['success'])
                     || (isset($invoice['cf']) && ! is_string($invoice['cf']))
+                    || (isset($invoice['due_date']) && ! is_string($invoice['due_date']))
+                    || (isset($invoice['invoice_number']) && ! is_string($invoice['invoice_number']))
                     || (isset($invoice['pdf_base64']) && ! is_string($invoice['pdf_base64']))) {
                     return false;
                 }
@@ -166,7 +181,18 @@ class SendInvoiceController extends Controller
 
     private function sendInvoicesToTemporaryEmails(array $attachments): void
     {
-        Mail::raw('Here are your invoices.', function ($message) use ($attachments) {
+        $lines = ['In allegato le fatture:', ''];
+        foreach ($attachments as $attachment) {
+            $number = $attachment['invoice_number'] ?? 'non disponibile';
+            $dueDate = $attachment['due_date']
+                ? \DateTimeImmutable::createFromFormat('!Y-m-d', $attachment['due_date'])->format('d/m/Y')
+                : 'non disponibile';
+            $lines[] = 'Fattura n. '.$number.' - Scadenza: '.$dueDate;
+            $lines[] = 'Allegato: '.$attachment['name'];
+            $lines[] = '';
+        }
+
+        Mail::raw(implode("\n", $lines), function ($message) use ($attachments) {
             $message->to(self::TEMP_EMAILS)->subject('Your Invoices');
             foreach ($attachments as $attachment) {
                 $message->attachData($attachment['pdf'], $attachment['name'], ['mime' => 'application/pdf']);
