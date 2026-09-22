@@ -68,7 +68,7 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertCount(2, $this->sent);
         $invoiceIndexesByEmail = [[0, 2, 3], [1]];
         foreach ($this->sent as $index => $email) {
-            $this->assertSame(['MOHAMEDELHADDAD997@gmail.com', 'mr10dev10@gmail.com'],
+            $this->assertSame(['mr10dev10@gmail.com'],
                 array_map(fn ($address) => $address->getAddress(), $email->getTo()));
             $this->assertCount(count($invoiceIndexesByEmail[$index]), $email->getAttachments());
             foreach ($invoiceIndexesByEmail[$index] as $attachmentIndex => $invoiceIndex) {

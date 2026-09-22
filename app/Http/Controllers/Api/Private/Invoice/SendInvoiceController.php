@@ -17,7 +17,6 @@ class SendInvoiceController extends Controller
         'cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d';
 
     private const TEMP_EMAILS = [
-        'MOHAMEDELHADDAD997@gmail.com',
         'mr10dev10@gmail.com',
     ];
 

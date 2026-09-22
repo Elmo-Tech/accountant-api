@@ -50,7 +50,7 @@ and invalid files are reported independently.
 Laravel checks each CF against clients, groups the valid invoices by normalized
 CF across all files in the request, and sends **one email per client** with a
 separate PDF attachment for every invoice. Different clients remain in separate
-emails even though all emails go to the existing two test addresses. Client
+emails even though all emails go to the test address `mr10dev10@gmail.com`. Client
 email addresses are not used. Unknown clients and failed pages are skipped;
 valid invoices still send. A mail failure is reported on every invoice in that
 client's email without blocking other clients. API `results` include source filename, zero-based `file_index`,
