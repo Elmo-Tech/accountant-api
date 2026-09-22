@@ -1,0 +1,64 @@
+# F24 per-invoice delivery
+
+This is the supplied FastAPI/Uvicorn container updated to return **one PDF per
+F24 page**, including repeated occurrences of the same codice fiscale. The
+sample format contains one complete F24 per page; multi-page invoices or several
+invoices on a single page require a different boundary rule.
+
+## Deploy
+
+`Dockerfile` is self-contained, just like the original. Replace the Dockerfile
+in the existing container deployment with this file, rebuild and redeploy that
+service. Keep port 8000, the existing HTTPS domain/reverse proxy, and the API key.
+The original key remains the fallback; the `API_KEY` environment variable can
+override it. The PHP controller and container must use the same key.
+
+For a local Docker build from the repository root:
+
+```sh
+docker build -t f24-ocr:3 deploy/f24-ocr
+```
+
+Deploy the changed `SendInvoiceController.php` together with the rebuilt
+container. An old successful single-CF response is rejected with HTTP 502 to
+prevent attaching a complete batch to a single client.
+
+The PHP OCR request timeout is 600 seconds. Configure the PHP/web server and
+reverse proxy to allow the same processing window for large scanned batches.
+
+## Behavior and response
+
+`GET /health`, `POST /read-cf`, multipart `files[]`, `X-API-Key`, the synchronous
+OCR handler, Italian/English OCR, temporary-directory cleanup, and 10 MB per-file
+limit are preserved. `pypdf` copies each original page without rasterizing its
+attachment. The source is also available in
+`app/Http/Controllers/Api/Private/Invoice/image_pro.py`; a test verifies that the
+Dockerfile's embedded Python is identical.
+
+The response remains an ordered array with one result per upload. Successful
+files contain `page_count` and an ordered `invoices` array, with one record per
+page: `page` (1-based), `cf`, `success`, `status`, and `pdf_base64` for recognized
+pages. No invoice is grouped or deduplicated by CF. Missing CFs, page OCR failures,
+and invalid files are reported independently.
+
+Laravel checks each CF against clients and sends a separate message containing
+only that invoice's PDF to the existing two test email addresses. Client email
+addresses are not used. Unknown clients and failed pages are skipped; later
+pages continue. API `results` include source filename, zero-based `file_index`,
+page number, and sending outcome, without PDF/base64 data. The original batch
+is never used as an attachment.
+
+## Tests
+
+Install the Python dependencies from the Dockerfile plus `httpx` for TestClient,
+then run:
+
+```sh
+python -m unittest discover -s tests/python -p "test_*.py"
+php vendor/bin/phpunit tests/Feature/SendUploadedInvoiceTest.php
+```
+
+Python tests use FastAPI's actual multipart endpoint and mock only OCR; PHP tests
+fake HTTP/mail and use an in-memory database. Neither sends real email.
+Optional `POPPLER_PATH`, `TESSERACT_CMD`, and `OCR_LANG` support local OCR testing;
+the container defaults remain system executables and `ita+eng`.

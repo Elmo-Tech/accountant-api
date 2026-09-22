@@ -1,3 +1,15 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr tesseract-ocr-ita tesseract-ocr-eng poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir \
+    fastapi "uvicorn[standard]" python-multipart pytesseract pdf2image pillow "pypdf>=5,<7"
+
+# Embedded from app/Http/Controllers/Api/Private/Invoice/image_pro.py.
+# Keep this standalone Dockerfile in sync with that source.
+RUN cat > /app/main.py <<'PY'
 """F24 OCR API: one independent invoice PDF per page, including repeated CFs."""
 import base64
 from io import BytesIO
@@ -136,3 +148,6 @@ if __name__ == "__main__":
     result = process_pdf(sys.argv[1], Path(sys.argv[1]).name)
     print(json.dumps(result))
     sys.exit(0 if result["success"] else 1)
+PY
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
