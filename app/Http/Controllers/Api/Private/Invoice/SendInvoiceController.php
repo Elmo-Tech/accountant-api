@@ -18,6 +18,9 @@ class SendInvoiceController extends Controller
 
     private const TEMP_EMAILS = [
         'mr10dev10@gmail.com',
+    ];
+
+    private const TEMP_BCC_EMAILS = [
         'mohamedelhaddad997@gmail.com',
     ];
 
@@ -196,7 +199,7 @@ class SendInvoiceController extends Controller
 
         Mail::raw($body, function ($message) use ($attachments, $subject) {
             $message->from(config('mail.from.address'), 'Servizio F24')
-                ->to(self::TEMP_EMAILS)->subject($subject);
+                ->to(self::TEMP_EMAILS)->bcc(self::TEMP_BCC_EMAILS)->subject($subject);
             foreach ($attachments as $attachment) {
                 $message->attachData($attachment['pdf'], $attachment['name'], ['mime' => 'application/pdf']);
             }

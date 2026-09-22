@@ -71,8 +71,11 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertCount(2, $this->sent);
         $invoiceIndexesByEmail = [[0, 2, 3], [1]];
         foreach ($this->sent as $index => $email) {
-            $this->assertSame(['mr10dev10@gmail.com', 'mohamedelhaddad997@gmail.com'],
+            $this->assertSame(['mr10dev10@gmail.com'],
                 array_map(fn ($address) => $address->getAddress(), $email->getTo()));
+            $this->assertSame(['mohamedelhaddad997@gmail.com'],
+                array_map(fn ($address) => $address->getAddress(), $email->getBcc()));
+            $this->assertSame([], $email->getCc());
             $this->assertCount(count($invoiceIndexesByEmail[$index]), $email->getAttachments());
             $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.", $email->getTextBody());
             $this->assertSame('Modelli F24 in scadenza - 30/09/2026', $email->getSubject());
@@ -86,6 +89,7 @@ class SendUploadedInvoiceTest extends TestCase
             }
         }
         $this->assertStringNotContainsString('pdf_base64', $response->getContent());
+        $this->assertStringNotContainsString('mohamedelhaddad997@gmail.com', $response->getContent());
     }
 
     public function test_missing_unknown_and_invalid_pages_are_skipped_without_stopping_valid_pages(): void
