@@ -17,10 +17,11 @@ class SendInvoiceController extends Controller
         'cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d';
 
     private const TEMP_EMAILS = [
-        'mr10dev10@gmail.com',
+        'angela@elaborazionistudio.com',
     ];
 
     private const TEMP_BCC_EMAILS = [
+        'mr10dev10@gmail.com',
         'mohamedelhaddad997@gmail.com',
     ];
 
