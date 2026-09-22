@@ -62,6 +62,7 @@ class SendInvoiceController extends Controller
         }
 
         $results = [];
+        $clientEmails = [];
         foreach ($ocrResults as $index => $ocrResult) {
             $originalName = $files[$index]->getClientOriginalName();
             if (! $ocrResult['success']) {
@@ -74,8 +75,8 @@ class SendInvoiceController extends Controller
                 continue;
             }
 
-            // Every occurrence gets its own attachment and message, even when
-            // several invoices belong to the same client.
+            // Keep each invoice as a separate PDF, but collect attachments by
+            // normalized CF across all files in this upload request.
             foreach ($ocrResult['invoices'] as $invoice) {
                 $result = [
                     'file' => $originalName, 'file_index' => $index, 'page' => $invoice['page'],
@@ -100,16 +101,28 @@ class SendInvoiceController extends Controller
                         $stem = preg_replace('/[^A-Za-z0-9_-]/', '_', pathinfo($originalName, PATHINFO_FILENAME));
                         $fileName = $stem.'_file_'.($index + 1).'_page_'.$invoice['page'].'.pdf';
                         $result['invoice_file'] = $fileName;
-                        try {
-                            $this->sendInvoiceToTemporaryEmails($pdf, $fileName);
-                            $result['email_sent'] = true;
-                            $result['emails'] = self::TEMP_EMAILS;
-                        } catch (\Throwable $e) {
-                            $result['email_error'] = $e->getMessage();
-                        }
+                        $groupKey = 'cf:'.$cf;
+                        $clientEmails[$groupKey]['attachments'][] = ['pdf' => $pdf, 'name' => $fileName];
+                        $clientEmails[$groupKey]['result_indexes'][] = count($results);
                     }
                 }
                 $results[] = $result;
+            }
+        }
+
+        // Test recipients are shared, but invoices from different clients must
+        // still be sent in different messages.
+        foreach ($clientEmails as $clientEmail) {
+            try {
+                $this->sendInvoicesToTemporaryEmails($clientEmail['attachments']);
+                foreach ($clientEmail['result_indexes'] as $resultIndex) {
+                    $results[$resultIndex]['email_sent'] = true;
+                    $results[$resultIndex]['emails'] = self::TEMP_EMAILS;
+                }
+            } catch (\Throwable $e) {
+                foreach ($clientEmail['result_indexes'] as $resultIndex) {
+                    $results[$resultIndex]['email_error'] = $e->getMessage();
+                }
             }
         }
 
@@ -152,11 +165,13 @@ class SendInvoiceController extends Controller
         return true;
     }
 
-    private function sendInvoiceToTemporaryEmails(string $pdf, string $fileName): void
+    private function sendInvoicesToTemporaryEmails(array $attachments): void
     {
-        Mail::raw('Here is your invoice.', function ($message) use ($pdf, $fileName) {
-            $message->to(self::TEMP_EMAILS)->subject('Your Invoice')
-                ->attachData($pdf, $fileName, ['mime' => 'application/pdf']);
+        Mail::raw('Here are your invoices.', function ($message) use ($attachments) {
+            $message->to(self::TEMP_EMAILS)->subject('Your Invoices');
+            foreach ($attachments as $attachment) {
+                $message->attachData($attachment['pdf'], $attachment['name'], ['mime' => 'application/pdf']);
+            }
         });
     }
 }

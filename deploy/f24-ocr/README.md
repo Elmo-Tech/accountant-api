@@ -16,7 +16,7 @@ override it. The PHP controller and container must use the same key.
 For a local Docker build from the repository root:
 
 ```sh
-docker build -t f24-ocr:3 deploy/f24-ocr
+docker build -t f24-ocr:3.1 deploy/f24-ocr
 ```
 
 Deploy the changed `SendInvoiceController.php` together with the rebuilt
@@ -35,18 +35,30 @@ attachment. The source is also available in
 `app/Http/Controllers/Api/Private/Invoice/image_pro.py`; a test verifies that the
 Dockerfile's embedded Python is identical.
 
+Version 3.1 reads the text layer first using Poppler's `pdftotext -layout`
+(already included in the image). Only pages without a recognized taxpayer CF
+use OCR. This avoids running 26 OCR operations for a 26-page text PDF. A failed
+text extraction or a page-count mismatch falls back to OCR without moving CFs
+between pages. `/openapi.json` reports version `3.1.0` after deployment.
+
 The response remains an ordered array with one result per upload. Successful
 files contain `page_count` and an ordered `invoices` array, with one record per
 page: `page` (1-based), `cf`, `success`, `status`, and `pdf_base64` for recognized
-pages. No invoice is grouped or deduplicated by CF. Missing CFs, page OCR failures,
+pages. Python does not merge or deduplicate the PDFs by CF. Missing CFs, page OCR failures,
 and invalid files are reported independently.
 
-Laravel checks each CF against clients and sends a separate message containing
-only that invoice's PDF to the existing two test email addresses. Client email
-addresses are not used. Unknown clients and failed pages are skipped; later
-pages continue. API `results` include source filename, zero-based `file_index`,
+Laravel checks each CF against clients, groups the valid invoices by normalized
+CF across all files in the request, and sends **one email per client** with a
+separate PDF attachment for every invoice. Different clients remain in separate
+emails even though all emails go to the existing two test addresses. Client
+email addresses are not used. Unknown clients and failed pages are skipped;
+valid invoices still send. A mail failure is reported on every invoice in that
+client's email without blocking other clients. API `results` include source filename, zero-based `file_index`,
 page number, and sending outcome, without PDF/base64 data. The original batch
 is never used as an attachment.
+
+Email grouping is implemented in `SendInvoiceController.php`; changing this
+grouping does not require rebuilding the Python container.
 
 ## Tests
 

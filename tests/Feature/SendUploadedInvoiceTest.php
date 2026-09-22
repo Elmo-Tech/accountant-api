@@ -60,20 +60,23 @@ class SendUploadedInvoiceTest extends TestCase
         return $this->postJson('/api/v1/send-uploaded-invoice', ['files' => $files]);
     }
 
-    public function test_repeated_client_gets_three_separate_invoices_and_other_client_gets_its_own(): void
+    public function test_each_client_gets_one_email_with_all_their_invoices_as_separate_attachments(): void
     {
         $invoices = [$this->invoice(1), $this->invoice(2, 'RSSMRA80A01H501U'), $this->invoice(3), $this->invoice(4)];
         $response = $this->upload([['success' => true, 'page_count' => 4, 'invoices' => $invoices]])
             ->assertOk()->assertJsonCount(4, 'results');
-        $this->assertCount(4, $this->sent);
+        $this->assertCount(2, $this->sent);
+        $invoiceIndexesByEmail = [[0, 2, 3], [1]];
         foreach ($this->sent as $index => $email) {
-            $response->assertJsonPath('results.'.$index.'.email_sent', true);
             $this->assertSame(['MOHAMEDELHADDAD997@gmail.com', 'mr10dev10@gmail.com'],
                 array_map(fn ($address) => $address->getAddress(), $email->getTo()));
-            $this->assertCount(1, $email->getAttachments());
-            $attachment = $email->getAttachments()[0];
-            $this->assertSame(base64_decode($invoices[$index]['pdf_base64']), $attachment->getBody());
-            $this->assertSame('batch_file_1_page_'.($index + 1).'.pdf', $attachment->getFilename());
+            $this->assertCount(count($invoiceIndexesByEmail[$index]), $email->getAttachments());
+            foreach ($invoiceIndexesByEmail[$index] as $attachmentIndex => $invoiceIndex) {
+                $response->assertJsonPath('results.'.$invoiceIndex.'.email_sent', true);
+                $attachment = $email->getAttachments()[$attachmentIndex];
+                $this->assertSame(base64_decode($invoices[$invoiceIndex]['pdf_base64']), $attachment->getBody());
+                $this->assertSame('batch_file_1_page_'.($invoiceIndex + 1).'.pdf', $attachment->getFilename());
+            }
         }
         $this->assertStringNotContainsString('pdf_base64', $response->getContent());
     }
@@ -126,14 +129,34 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertNotSame($this->sent[0]->getAttachments()[0]->getFilename(), $this->sent[1]->getAttachments()[0]->getFilename());
     }
 
-    public function test_mail_failure_does_not_block_later_invoices(): void
+    public function test_mail_failure_marks_all_client_invoices_and_does_not_block_other_clients(): void
     {
         Mail::swap(\Mockery::mock());
         Mail::shouldReceive('raw')->once()->ordered()->andThrow(new \RuntimeException('SMTP failure'));
         Mail::shouldReceive('raw')->once()->ordered()->andReturnNull();
-        $this->upload([['success' => true, 'page_count' => 2, 'invoices' => [$this->invoice(1), $this->invoice(2)]]])
+        $this->upload([['success' => true, 'page_count' => 3, 'invoices' => [
+            $this->invoice(1), $this->invoice(2, 'RSSMRA80A01H501U'), $this->invoice(3),
+        ]]])
             ->assertOk()->assertJsonPath('results.0.email_sent', false)
             ->assertJsonPath('results.0.email_error', 'SMTP failure')
-            ->assertJsonPath('results.1.email_sent', true);
+            ->assertJsonPath('results.1.email_sent', true)
+            ->assertJsonPath('results.2.email_sent', false)
+            ->assertJsonPath('results.2.email_error', 'SMTP failure');
+    }
+
+    public function test_same_client_across_uploaded_files_gets_one_email_with_unique_attachment_names(): void
+    {
+        DB::table('clients')->insert(['id' => 3, 'cf' => '01719370197']);
+        $this->upload([
+            ['success' => true, 'page_count' => 1, 'invoices' => [$this->invoice(1, '01719370197')]],
+            ['success' => true, 'page_count' => 1, 'invoices' => [$this->invoice(1, ' 01719370197 ')]],
+        ], 2)->assertOk()->assertJsonPath('results.0.email_sent', true)
+            ->assertJsonPath('results.1.email_sent', true)
+            ->assertJsonPath('results.1.cf', '01719370197');
+        $this->assertCount(1, $this->sent);
+        $attachments = $this->sent[0]->getAttachments();
+        $this->assertCount(2, $attachments);
+        $this->assertSame('batch_file_1_page_1.pdf', $attachments[0]->getFilename());
+        $this->assertSame('batch_file_2_page_1.pdf', $attachments[1]->getFilename());
     }
 }

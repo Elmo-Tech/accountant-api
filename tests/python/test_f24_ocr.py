@@ -1,6 +1,8 @@
 import base64
 from io import BytesIO
 import importlib.util
+import subprocess
+from types import SimpleNamespace
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -41,6 +43,11 @@ class F24OcrTest(unittest.TestCase):
         self.key_patch = patch.object(ocr, 'API_KEY', 'test-only-key')
         self.key_patch.start()
         self.addCleanup(self.key_patch.stop)
+        # Existing OCR tests exercise the scanned-document fallback without
+        # requiring a local Poppler installation.
+        self.text_patch = patch.object(ocr, 'read_text_pages', side_effect=lambda path, count: [''] * count)
+        self.text_patch.start()
+        self.addCleanup(self.text_patch.stop)
 
     def upload(self, files):
         return self.client.post('/read-cf', headers={'X-API-Key': 'test-only-key'}, files=files)
@@ -104,6 +111,26 @@ class F24OcrTest(unittest.TestCase):
         dockerfile = (ROOT / 'deploy/f24-ocr/Dockerfile').read_text(encoding='utf-8')
         embedded = dockerfile.split("RUN cat > /app/main.py <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
         self.assertEqual(embedded, SOURCE.read_text(encoding='utf-8').rstrip('\n'))
+
+    def test_text_batch_does_not_run_ocr_and_preserves_page_client_order(self):
+        self.text_patch.stop()
+        text = 'CODICE FISCALE LHDMMD97T01Z336N\fCODICE FISCALE RSSMRA80A01H501U\fCODICE FISCALE LHDMMD97T01Z336N\f'
+        with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=text.encode())):
+            with patch.object(ocr, 'read_page_cf', side_effect=AssertionError('Unexpected OCR')):
+                result = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b', 'c']), 'application/pdf'))]).json()[0]
+        self.assertEqual([i['cf'] for i in result['invoices']], ['LHDMMD97T01Z336N', 'RSSMRA80A01H501U', 'LHDMMD97T01Z336N'])
+        self.assertTrue(all(i['success'] and 'pdf_base64' in i for i in result['invoices']))
+
+    def test_incomplete_text_output_never_assigns_cf_to_wrong_page(self):
+        self.text_patch.stop()
+        with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=b'CODICE FISCALE LHDMMD97T01Z336N\f')):
+            self.assertEqual(ocr.read_text_pages('batch.pdf', 2), ['', ''])
+
+    def test_text_extractor_timeout_falls_back_to_ocr(self):
+        self.text_patch.stop()
+        with patch.object(ocr.subprocess, 'run', side_effect=subprocess.TimeoutExpired('pdftotext', 30)):
+            with self.assertLogs('uvicorn.error', level='WARNING'):
+                self.assertEqual(ocr.read_text_pages('batch.pdf', 2), ['', ''])
 
 
 if __name__ == '__main__':

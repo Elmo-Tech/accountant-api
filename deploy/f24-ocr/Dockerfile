@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import subprocess
 import sys
 import tempfile
 
@@ -27,7 +28,7 @@ from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from pdf2image import convert_from_path
 from pypdf import PdfReader, PdfWriter
 
-app = FastAPI(title="F24 Codice Fiscale Reader", version="3.0.0")
+app = FastAPI(title="F24 Codice Fiscale Reader", version="3.1.0")
 logger = logging.getLogger("uvicorn.error")
 API_KEY = os.getenv("API_KEY", "cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d")
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -63,6 +64,28 @@ def read_page_cf(pdf_path: str, page_number: int) -> str | None:
             page.close()
 
 
+def read_text_pages(pdf_path: str, page_count: int) -> list[str]:
+    # Poppler reconstructs the visual reading order of F24 template/overlay
+    # PDFs. Plain PDF extraction can put the CF far away from its field label.
+    # pdftotext is already installed by poppler-utils in the container.
+    executable = "pdftotext.exe" if os.name == "nt" else "pdftotext"
+    if os.getenv("POPPLER_PATH"):
+        executable = str(Path(os.environ["POPPLER_PATH"]) / executable)
+    try:
+        result = subprocess.run(
+            [executable, "-layout", "-enc", "UTF-8", pdf_path, "-"],
+            capture_output=True, check=True, timeout=30,
+        )
+        pages = result.stdout.decode("utf-8").split("\f")
+        if pages and not pages[-1].strip():
+            pages.pop()
+        # Never shift identifiers between pages when extraction is incomplete.
+        return pages if len(pages) == page_count else [""] * page_count
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        logger.warning("F24 text extraction unavailable; using page OCR")
+        return [""] * page_count
+
+
 def process_pdf(pdf_path: str, filename: str) -> dict:
     result = {"file": filename, "success": False, "status": "error", "invoices": []}
     try:
@@ -73,11 +96,14 @@ def process_pdf(pdf_path: str, filename: str) -> dict:
             page_count = len(reader.pages)
             if not page_count:
                 raise ValueError("Empty PDF")
+            text_pages = read_text_pages(pdf_path, page_count)
             invoices = []
             for page_number in range(1, page_count + 1):
                 invoice = {"page": page_number, "success": False, "cf": None, "status": "error"}
                 try:
-                    cf = read_page_cf(pdf_path, page_number)
+                    cf = extract_cf(text_pages[page_number - 1])
+                    if not cf:
+                        cf = read_page_cf(pdf_path, page_number)
                     invoice.update(success=True, cf=cf, status="processed" if cf else "not_found")
                     if cf:
                         # Copy the original page, preserving its appearance and
