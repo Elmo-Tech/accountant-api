@@ -84,9 +84,9 @@ API `results` include source filename, zero-based `file_index`, page number,
 presentation type, and sending outcome without PDF/base64 data. The original
 batch is never used as an attachment.
 
-**Test-only delivery:** every message goes exclusively to `mr10dev10@gmail.com`
-in To, with no CC or BCC. Angela and Mohamed Elhaddad are commented out in the
-controller. Client/contact email addresses are never used, including for CC/BCC.
+**Fixed delivery recipients:** every message goes to `angela@elaborazionistudio.com`
+in To, with `mohamedelhaddad997@gmail.com` and `mr10dev10@gmail.com` in BCC and no CC.
+Client/contact email addresses are never used, including for CC/BCC.
 
 The Dockerfile is based on the user-supplied version, with the presentation-type
 addition and its embedded Python mirrored in `image_pro.py`. Each email uses
@@ -119,7 +119,7 @@ override applies only to F24 emails. If the first invoice's date is missing,
 the body says `La data di scadenza non è disponibile.` and the subject is
 `Invio modelli F24`; later dates are not substituted. The API still exposes
 `invoice_number` and ISO `due_date` for each invoice. The API's `emails` field
-contains only `mr10dev10@gmail.com` in the current test configuration.
+contains only `angela@elaborazionistudio.com`; BCC addresses are not exposed.
 
 Rebuild/redeploy the updated Dockerfile and upload the changed controller
 together for type-based grouping and templates. No database migration is needed.

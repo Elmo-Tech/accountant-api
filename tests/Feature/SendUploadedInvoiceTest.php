@@ -39,11 +39,10 @@ class SendUploadedInvoiceTest extends TestCase
             $email = new Email;
             $email->text($body);
             $callback(new Message($email));
-            // Every test verifies that no real client/contact, Angela, or BCC
-            // recipient can receive these test messages.
-            $this->assertSame(['mr10dev10@gmail.com'], array_map(fn ($address) => $address->getAddress(), $email->getTo()));
+            // Every test verifies the fixed recipients, excluding client/contact emails.
+            $this->assertSame(['angela@elaborazionistudio.com'], array_map(fn ($address) => $address->getAddress(), $email->getTo()));
             $this->assertSame([], $email->getCc());
-            $this->assertSame([], $email->getBcc());
+            $this->assertSame(['mohamedelhaddad997@gmail.com', 'mr10dev10@gmail.com'], array_map(fn ($address) => $address->getAddress(), $email->getBcc()));
             $this->sent[] = $email;
         });
     }
@@ -85,9 +84,9 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertCount(2, $this->sent);
         $invoiceIndexesByEmail = [[0, 2, 3], [1]];
         foreach ($this->sent as $index => $email) {
-            $this->assertSame(['mr10dev10@gmail.com'],
+            $this->assertSame(['angela@elaborazionistudio.com'],
                 array_map(fn ($address) => $address->getAddress(), $email->getTo()));
-            $this->assertSame([],
+            $this->assertSame(['mohamedelhaddad997@gmail.com', 'mr10dev10@gmail.com'],
                 array_map(fn ($address) => $address->getAddress(), $email->getBcc()));
             $this->assertSame([], $email->getCc());
             $this->assertCount(count($invoiceIndexesByEmail[$index]), $email->getAttachments());
@@ -97,7 +96,7 @@ class SendUploadedInvoiceTest extends TestCase
             $this->assertSame('billing@example.test', $email->getFrom()[0]->getAddress());
             foreach ($invoiceIndexesByEmail[$index] as $attachmentIndex => $invoiceIndex) {
                 $response->assertJsonPath('results.'.$invoiceIndex.'.email_sent', true);
-                $response->assertJsonPath('results.'.$invoiceIndex.'.emails', ['mr10dev10@gmail.com']);
+                $response->assertJsonPath('results.'.$invoiceIndex.'.emails', ['angela@elaborazionistudio.com']);
                 $attachment = $email->getAttachments()[$attachmentIndex];
                 $this->assertSame(base64_decode($invoices[$invoiceIndex]['pdf_base64']), $attachment->getBody());
                 $this->assertSame('batch_file_1_page_'.($invoiceIndex + 1).'.pdf', $attachment->getFilename());
@@ -105,7 +104,7 @@ class SendUploadedInvoiceTest extends TestCase
         }
         $this->assertStringNotContainsString('pdf_base64', $response->getContent());
         $this->assertStringNotContainsString('mohamedelhaddad997@gmail.com', $response->getContent());
-        $this->assertStringNotContainsString('angela@elaborazionistudio.com', $response->getContent());
+        $this->assertStringNotContainsString('mr10dev10@gmail.com', $response->getContent());
     }
 
     public function test_missing_unknown_and_invalid_pages_are_skipped_without_stopping_valid_pages(): void
