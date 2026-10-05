@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\Private\Invoice;
 
 use App\Http\Controllers\Controller;
 use App\Models\Client\Client;
+use App\Models\Client\ClientContact;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
@@ -17,13 +18,15 @@ class SendInvoiceController extends Controller
         'cf21978a406f3dd83f265498a48bd8113dc5da235c18e37db55ae3dec254649d';
 
     private const TEMP_EMAILS = [
-        'angela@elaborazionistudio.com',
+        'mr10dev10@gmail.com',
+        // 'angela@elaborazionistudio.com',
     ];
 
     private const TEMP_BCC_EMAILS = [
-        'mr10dev10@gmail.com',
-        'mohamedelhaddad997@gmail.com',
+        // 'mohamedelhaddad997@gmail.com',
     ];
+
+    private const PRESENTATION_TYPES = ['cartacea', 'telematico_entratel'];
 
     public function index(Request $request)
     {
@@ -72,7 +75,8 @@ class SendInvoiceController extends Controller
             if (! $ocrResult['success']) {
                 $results[] = [
                     'file' => $originalName, 'file_index' => $index, 'success' => false,
-                    'cf' => null, 'status' => 'error', 'client_found' => false, 'email_sent' => false,
+                    'cf' => null, 'status' => 'error', 'client_found' => false, 'contact_found' => false,
+                    'matched_in' => null, 'matched_id' => null, 'email_sent' => false,
                     'error' => $ocrResult['error'] ?? 'Unable to process PDF',
                 ];
 
@@ -80,13 +84,15 @@ class SendInvoiceController extends Controller
             }
 
             // Keep each invoice as a separate PDF, but collect attachments by
-            // normalized CF across all files in this upload request.
+            // normalized CF and presentation type across all uploaded files.
             foreach ($ocrResult['invoices'] as $invoice) {
                 $result = [
                     'file' => $originalName, 'file_index' => $index, 'page' => $invoice['page'],
                     'success' => $invoice['success'], 'cf' => $invoice['cf'] ?? null,
                     'status' => $invoice['status'] ?? null, 'client_found' => false, 'email_sent' => false,
                     'invoice_number' => null, 'due_date' => null,
+                    'contact_found' => false, 'matched_in' => null, 'matched_id' => null,
+                    'presentation_type' => $invoice['presentation_type'] ?? null,
                 ];
                 $number = $invoice['invoice_number'] ?? null;
                 $date = $invoice['due_date'] ?? null;
@@ -108,14 +114,33 @@ class SendInvoiceController extends Controller
                     if ($pdf === false || ! str_starts_with($pdf, '%PDF-')) {
                         $result['success'] = false;
                         $result['error'] = 'Missing or invalid invoice PDF';
-                    } elseif (! Client::where('cf', $cf)->exists()) {
-                        $result['message'] = 'Client not found for this Codice Fiscale';
                     } else {
-                        $result['client_found'] = true;
+                        // Match identity only. Never use client/contact email addresses
+                        // for recipients while this workflow is in test mode.
+                        $client = Client::where('cf', $cf)->first(['id']);
+                        $contact = $client ? null : ClientContact::where('cf', $cf)->first(['id']);
+                        $result['client_found'] = $client !== null;
+                        $result['contact_found'] = $contact !== null;
+                        $result['matched_in'] = $client ? 'clients' : ($contact ? 'contacts' : null);
+                        $result['matched_id'] = ($client ?? $contact)?->id;
+                        if (! $client && ! $contact) {
+                            $result['message'] = 'Client or contact not found for this Codice Fiscale';
+                            $results[] = $result;
+
+                            continue;
+                        }
+                        $presentationType = $result['presentation_type'];
+                        if (! in_array($presentationType, self::PRESENTATION_TYPES, true)) {
+                            $result['message'] = 'Missing or ambiguous F24 presentation type; email not sent';
+                            $results[] = $result;
+
+                            continue;
+                        }
                         $stem = preg_replace('/[^A-Za-z0-9_-]/', '_', pathinfo($originalName, PATHINFO_FILENAME));
                         $fileName = $stem.'_file_'.($index + 1).'_page_'.$invoice['page'].'.pdf';
                         $result['invoice_file'] = $fileName;
-                        $groupKey = 'cf:'.$cf;
+                        $groupKey = 'cf:'.$cf.':'.$presentationType;
+                        $clientEmails[$groupKey]['presentation_type'] = $presentationType;
                         $clientEmails[$groupKey]['attachments'][] = [
                             'pdf' => $pdf, 'name' => $fileName,
                             'invoice_number' => $result['invoice_number'], 'due_date' => $result['due_date'],
@@ -131,7 +156,7 @@ class SendInvoiceController extends Controller
         // still be sent in different messages.
         foreach ($clientEmails as $clientEmail) {
             try {
-                $this->sendInvoicesToTemporaryEmails($clientEmail['attachments']);
+                $this->sendInvoicesToTemporaryEmails($clientEmail['attachments'], $clientEmail['presentation_type']);
                 foreach ($clientEmail['result_indexes'] as $resultIndex) {
                     $results[$resultIndex]['email_sent'] = true;
                     $results[$resultIndex]['emails'] = self::TEMP_EMAILS;
@@ -175,6 +200,7 @@ class SendInvoiceController extends Controller
                     || (isset($invoice['cf']) && ! is_string($invoice['cf']))
                     || (isset($invoice['due_date']) && ! is_string($invoice['due_date']))
                     || (isset($invoice['invoice_number']) && ! is_string($invoice['invoice_number']))
+                    || (isset($invoice['presentation_type']) && ! is_string($invoice['presentation_type']))
                     || (isset($invoice['pdf_base64']) && ! is_string($invoice['pdf_base64']))) {
                     return false;
                 }
@@ -184,10 +210,10 @@ class SendInvoiceController extends Controller
         return true;
     }
 
-    private function sendInvoicesToTemporaryEmails(array $attachments): void
+    private function sendInvoicesToTemporaryEmails(array $attachments, string $presentationType): void
     {
         // Use the first attached invoice in upload/page order, not the earliest
-        // date or a date from a later invoice belonging to the same client.
+        // date or a date from another presentation group for the same person.
         $firstDueDate = $attachments[0]['due_date'] ?? null;
         $dueDate = $firstDueDate
             ? \DateTimeImmutable::createFromFormat('!Y-m-d', $firstDueDate)->format('d/m/Y')
@@ -196,11 +222,18 @@ class SendInvoiceController extends Controller
         $body .= $dueDate
             ? ' in scadenza il '.$dueDate.'.'
             : '. La data di scadenza non è disponibile.';
+        if ($presentationType === 'telematico_entratel') {
+            $body .= "\nAttendiamo la solita autorizzazione per procedere con l’addebito telematico.";
+        }
+        $body .= "\n\nCordiali saluti.\nElaborazioni Srl\nVia Stazione, 9/D\nCrema (CR)\nTel.+39 0373 86998";
         $subject = $dueDate ? 'Modelli F24 in scadenza - '.$dueDate : 'Invio modelli F24';
 
         Mail::raw($body, function ($message) use ($attachments, $subject) {
             $message->from(config('mail.from.address'), 'Servizio F24')
-                ->to(self::TEMP_EMAILS)->bcc(self::TEMP_BCC_EMAILS)->subject($subject);
+                ->to(self::TEMP_EMAILS)->subject($subject);
+            if (self::TEMP_BCC_EMAILS !== []) {
+                $message->bcc(self::TEMP_BCC_EMAILS);
+            }
             foreach ($attachments as $attachment) {
                 $message->attachData($attachment['pdf'], $attachment['name'], ['mime' => 'application/pdf']);
             }

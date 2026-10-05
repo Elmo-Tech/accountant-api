@@ -41,7 +41,7 @@ from pypdf import PdfReader, PdfWriter
 
 app = FastAPI(
     title="F24 Codice Fiscale Reader",
-    version="3.2.0",
+    version="3.3.0",
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -148,6 +148,16 @@ def extract_reference(text: str) -> dict:
     }
 
 
+def extract_presentation_type(text: str) -> str | None:
+    """Read the explicit footer label; do not infer type from bank/debit notes."""
+    types = []
+    if re.search(r"\bPRESENTAZIONE\s+CARTACEA\b", text or "", re.IGNORECASE):
+        types.append("cartacea")
+    if re.search(r"\bTELEMATICO\s+ENTRATEL\b", text or "", re.IGNORECASE):
+        types.append("telematico_entratel")
+    return types[0] if len(types) == 1 else None
+
+
 def read_pdf_text_pages(
     pdf_path: str,
     page_count: int,
@@ -235,7 +245,7 @@ def read_page_ocr_text(
 
         reference = extract_reference(text)
 
-        if not all(reference.values()):
+        if not all(reference.values()) or not extract_presentation_type(text):
             try:
                 footer_top = int(
                     page_image.height * 0.85
@@ -339,6 +349,7 @@ def process_pdf(
                     "status": "error",
                     "due_date": None,
                     "invoice_number": None,
+                    "presentation_type": None,
                 }
 
                 try:
@@ -347,6 +358,7 @@ def process_pdf(
                     ]
 
                     cf = extract_cf(text)
+                    presentation_type = extract_presentation_type(text)
 
                     reference = extract_reference(
                         text
@@ -354,6 +366,7 @@ def process_pdf(
 
                     if (
                         not cf
+                        or not presentation_type
                         or not all(
                             reference.values()
                         )
@@ -369,6 +382,9 @@ def process_pdf(
                             cf = extract_cf(
                                 ocr_text
                             )
+
+                        # Combining sources also rejects conflicting type labels.
+                        presentation_type = extract_presentation_type(text + "\n" + ocr_text)
 
                         ocr_reference = (
                             extract_reference(
@@ -391,6 +407,9 @@ def process_pdf(
                     invoice.update(
                         reference
                     )
+                    invoice["presentation_type"] = presentation_type
+                    if not presentation_type:
+                        invoice["presentation_warning"] = "F24 presentation type is missing or ambiguous"
 
                     if cf:
                         invoice.update(
@@ -553,7 +572,7 @@ def process_file(
 def health():
     return {
         "status": "ok",
-        "version": "3.2.0",
+        "version": "3.3.0",
     }
 
 

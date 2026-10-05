@@ -12,6 +12,8 @@ use Tests\TestCase;
 
 class SendUploadedInvoiceTest extends TestCase
 {
+    private const SIGNATURE = "\n\nCordiali saluti.\nElaborazioni Srl\nVia Stazione, 9/D\nCrema (CR)\nTel.+39 0373 86998";
+
     private array $sent = [];
 
     protected function setUp(): void
@@ -21,16 +23,27 @@ class SendUploadedInvoiceTest extends TestCase
         config(['mail.from.address' => 'billing@example.test', 'mail.from.name' => 'Laravel']);
         config(['database.default' => 'sqlite', 'database.connections.sqlite.database' => ':memory:']);
         DB::purge('sqlite');
-        DB::statement('CREATE TABLE clients (id INTEGER PRIMARY KEY, cf TEXT, deleted_at TEXT)');
+        DB::statement('CREATE TABLE clients (id INTEGER PRIMARY KEY, cf TEXT, email TEXT, deleted_at TEXT)');
+        DB::statement('CREATE TABLE client_contacts (id INTEGER PRIMARY KEY, client_id INTEGER, cf TEXT, email TEXT, deleted_at TEXT)');
         DB::table('clients')->insert([
             ['id' => 1, 'cf' => 'LHDMMD97T01Z336N'],
             ['id' => 2, 'cf' => 'RSSMRA80A01H501U'],
+        ]);
+        DB::table('clients')->where('id', 1)->update(['email' => 'real-client@example.test']);
+        DB::table('client_contacts')->insert([
+            ['id' => 10, 'client_id' => 1, 'cf' => 'RNCSMN92T22I274S', 'email' => 'real-contact@example.test'],
+            ['id' => 11, 'client_id' => 1, 'cf' => 'LHDMMD97T01Z336N', 'email' => 'duplicate-contact@example.test'],
         ]);
         Http::preventStrayRequests();
         Mail::shouldReceive('raw')->andReturnUsing(function ($body, $callback) {
             $email = new Email;
             $email->text($body);
             $callback(new Message($email));
+            // Every test verifies that no real client/contact, Angela, or BCC
+            // recipient can receive these test messages.
+            $this->assertSame(['mr10dev10@gmail.com'], array_map(fn ($address) => $address->getAddress(), $email->getTo()));
+            $this->assertSame([], $email->getCc());
+            $this->assertSame([], $email->getBcc());
             $this->sent[] = $email;
         });
     }
@@ -48,6 +61,7 @@ class SendUploadedInvoiceTest extends TestCase
     private function invoice(int $page, string $cf = 'LHDMMD97T01Z336N'): array
     {
         return ['page' => $page, 'success' => true, 'cf' => $cf, 'status' => 'processed',
+            'presentation_type' => 'cartacea',
             'invoice_number' => (string) (76 + $page), 'due_date' => '2026-09-30',
             'pdf_base64' => base64_encode($this->pdf('Invoice '.$page.' '.$cf))];
     }
@@ -71,19 +85,19 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertCount(2, $this->sent);
         $invoiceIndexesByEmail = [[0, 2, 3], [1]];
         foreach ($this->sent as $index => $email) {
-            $this->assertSame(['angela@elaborazionistudio.com'],
+            $this->assertSame(['mr10dev10@gmail.com'],
                 array_map(fn ($address) => $address->getAddress(), $email->getTo()));
-            $this->assertSame(['mr10dev10@gmail.com', 'mohamedelhaddad997@gmail.com'],
+            $this->assertSame([],
                 array_map(fn ($address) => $address->getAddress(), $email->getBcc()));
             $this->assertSame([], $email->getCc());
             $this->assertCount(count($invoiceIndexesByEmail[$index]), $email->getAttachments());
-            $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.", $email->getTextBody());
+            $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.".self::SIGNATURE, $email->getTextBody());
             $this->assertSame('Modelli F24 in scadenza - 30/09/2026', $email->getSubject());
             $this->assertSame('Servizio F24', $email->getFrom()[0]->getName());
             $this->assertSame('billing@example.test', $email->getFrom()[0]->getAddress());
             foreach ($invoiceIndexesByEmail[$index] as $attachmentIndex => $invoiceIndex) {
                 $response->assertJsonPath('results.'.$invoiceIndex.'.email_sent', true);
-                $response->assertJsonPath('results.'.$invoiceIndex.'.emails', ['angela@elaborazionistudio.com']);
+                $response->assertJsonPath('results.'.$invoiceIndex.'.emails', ['mr10dev10@gmail.com']);
                 $attachment = $email->getAttachments()[$attachmentIndex];
                 $this->assertSame(base64_decode($invoices[$invoiceIndex]['pdf_base64']), $attachment->getBody());
                 $this->assertSame('batch_file_1_page_'.($invoiceIndex + 1).'.pdf', $attachment->getFilename());
@@ -91,7 +105,7 @@ class SendUploadedInvoiceTest extends TestCase
         }
         $this->assertStringNotContainsString('pdf_base64', $response->getContent());
         $this->assertStringNotContainsString('mohamedelhaddad997@gmail.com', $response->getContent());
-        $this->assertStringNotContainsString('mr10dev10@gmail.com', $response->getContent());
+        $this->assertStringNotContainsString('angela@elaborazionistudio.com', $response->getContent());
     }
 
     public function test_missing_unknown_and_invalid_pages_are_skipped_without_stopping_valid_pages(): void
@@ -186,7 +200,7 @@ class SendUploadedInvoiceTest extends TestCase
             ->assertJsonPath('results.1.due_date', '2026-10-31');
         $this->assertCount(1, $this->sent);
         $this->assertCount(5, $this->sent[0]->getAttachments());
-        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.", $this->sent[0]->getTextBody());
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.".self::SIGNATURE, $this->sent[0]->getTextBody());
         $this->assertSame('Modelli F24 in scadenza - 30/09/2026', $this->sent[0]->getSubject());
     }
 
@@ -202,7 +216,7 @@ class SendUploadedInvoiceTest extends TestCase
             ->assertJsonPath('results.0.due_date', null)
             ->assertJsonPath('results.1.due_date', null);
         $body = $this->sent[0]->getTextBody();
-        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24. La data di scadenza non è disponibile.", $body);
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24. La data di scadenza non è disponibile.".self::SIGNATURE, $body);
         $this->assertSame('Invio modelli F24', $this->sent[0]->getSubject());
         $this->assertCount(3, $this->sent[0]->getAttachments());
     }
@@ -221,6 +235,104 @@ class SendUploadedInvoiceTest extends TestCase
         $this->assertCount(2, $this->sent);
         $this->assertCount(2, $this->sent[0]->getAttachments());
         $this->assertSame('Modelli F24 in scadenza - 30/09/2026', $this->sent[0]->getSubject());
-        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 31/10/2026.", $this->sent[1]->getTextBody());
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 31/10/2026.".self::SIGNATURE, $this->sent[1]->getTextBody());
+    }
+
+    public function test_contact_cf_is_found_after_client_lookup_without_using_contact_email(): void
+    {
+        $invoice = array_merge($this->invoice(1, 'RNCSMN92T22I274S'), [
+            'presentation_type' => 'telematico_entratel', 'due_date' => '2026-10-14',
+        ]);
+        $this->upload([['success' => true, 'page_count' => 1, 'invoices' => [$invoice]]])
+            ->assertOk()->assertJsonPath('results.0.client_found', false)
+            ->assertJsonPath('results.0.contact_found', true)
+            ->assertJsonPath('results.0.matched_in', 'contacts')
+            ->assertJsonPath('results.0.matched_id', 10)
+            ->assertJsonPath('results.0.email_sent', true);
+        $this->assertCount(1, $this->sent);
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 14/10/2026.\nAttendiamo la solita autorizzazione per procedere con l’addebito telematico.".self::SIGNATURE, $this->sent[0]->getTextBody());
+    }
+
+    public function test_client_takes_precedence_over_contact_with_same_cf(): void
+    {
+        $this->upload([['success' => true, 'page_count' => 1, 'invoices' => [$this->invoice(1)]]])
+            ->assertOk()->assertJsonPath('results.0.client_found', true)
+            ->assertJsonPath('results.0.contact_found', false)
+            ->assertJsonPath('results.0.matched_in', 'clients')
+            ->assertJsonPath('results.0.matched_id', 1);
+        $this->assertCount(1, $this->sent);
+    }
+
+    public function test_two_paper_and_two_electronic_invoices_make_two_emails_with_two_attachments(): void
+    {
+        $invoices = [];
+        foreach (['cartacea', 'telematico_entratel', 'cartacea', 'telematico_entratel'] as $index => $type) {
+            $invoices[] = array_merge($this->invoice($index + 1, 'RNCSMN92T22I274S'), [
+                'presentation_type' => $type,
+                'due_date' => ['2026-09-30', '2026-10-14', '2026-11-01', '2026-12-01'][$index],
+            ]);
+        }
+        $response = $this->upload([['success' => true, 'page_count' => 4, 'invoices' => $invoices]])->assertOk();
+        $this->assertCount(2, $this->sent);
+        foreach ([[0, 2], [1, 3]] as $emailIndex => $invoiceIndexes) {
+            $this->assertCount(2, $this->sent[$emailIndex]->getAttachments());
+            foreach ($invoiceIndexes as $attachmentIndex => $invoiceIndex) {
+                $response->assertJsonPath('results.'.$invoiceIndex.'.email_sent', true);
+                $this->assertSame(base64_decode($invoices[$invoiceIndex]['pdf_base64']), $this->sent[$emailIndex]->getAttachments()[$attachmentIndex]->getBody());
+            }
+        }
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 30/09/2026.".self::SIGNATURE, $this->sent[0]->getTextBody());
+        $this->assertSame("Gentile Cliente,\n\nin allegato il modello F24 in scadenza il 14/10/2026.\nAttendiamo la solita autorizzazione per procedere con l’addebito telematico.".self::SIGNATURE, $this->sent[1]->getTextBody());
+    }
+
+    public function test_four_same_type_contact_invoices_make_one_email_with_four_attachments(): void
+    {
+        $invoices = array_map(fn ($page) => array_merge($this->invoice($page, 'RNCSMN92T22I274S'), ['presentation_type' => 'telematico_entratel']), range(1, 4));
+        $this->upload([['success' => true, 'page_count' => 4, 'invoices' => $invoices]])->assertOk();
+        $this->assertCount(1, $this->sent);
+        $this->assertCount(4, $this->sent[0]->getAttachments());
+    }
+
+    public function test_contact_and_parent_client_invoices_are_not_merged(): void
+    {
+        $this->upload([['success' => true, 'page_count' => 2, 'invoices' => [
+            $this->invoice(1), $this->invoice(2, 'RNCSMN92T22I274S'),
+        ]]])->assertOk();
+        $this->assertCount(2, $this->sent);
+        $this->assertCount(1, $this->sent[0]->getAttachments());
+        $this->assertCount(1, $this->sent[1]->getAttachments());
+    }
+
+    public function test_one_presentation_group_failure_does_not_block_other_type_for_same_person(): void
+    {
+        Mail::swap(\Mockery::mock());
+        Mail::shouldReceive('raw')->once()->ordered()->andThrow(new \RuntimeException('SMTP failure'));
+        Mail::shouldReceive('raw')->once()->ordered()->andReturnNull();
+        $this->upload([['success' => true, 'page_count' => 3, 'invoices' => [
+            $this->invoice(1),
+            array_merge($this->invoice(2), ['presentation_type' => 'telematico_entratel']),
+            $this->invoice(3),
+        ]]])->assertOk()->assertJsonPath('results.0.email_sent', false)
+            ->assertJsonPath('results.0.email_error', 'SMTP failure')
+            ->assertJsonPath('results.1.email_sent', true)
+            ->assertJsonPath('results.2.email_sent', false)
+            ->assertJsonPath('results.2.email_error', 'SMTP failure');
+    }
+
+    public function test_missing_unknown_type_and_deleted_contact_are_skipped_without_guessing_template(): void
+    {
+        DB::table('client_contacts')->where('id', 10)->update(['deleted_at' => '2026-10-01']);
+        $missing = $this->invoice(1);
+        unset($missing['presentation_type']);
+        $unknown = array_merge($this->invoice(2), ['presentation_type' => 'unrecognized']);
+        $this->upload([['success' => true, 'page_count' => 4, 'invoices' => [
+            $missing, $unknown, $this->invoice(3, 'RNCSMN92T22I274S'), $this->invoice(4),
+        ]]])->assertOk()->assertJsonPath('results.0.email_sent', false)
+            ->assertJsonPath('results.1.email_sent', false)
+            ->assertJsonPath('results.2.contact_found', false)
+            ->assertJsonPath('results.2.email_sent', false)
+            ->assertJsonPath('results.3.email_sent', true);
+        $this->assertCount(1, $this->sent);
+        $this->assertCount(1, $this->sent[0]->getAttachments());
     }
 }

@@ -90,7 +90,7 @@ class F24OcrTest(unittest.TestCase):
         self.assertEqual(result[1]['page_count'], 1)
 
     def test_health_auth_mime_and_file_size_validation(self):
-        self.assertEqual(self.client.get('/health').json(), {'status': 'ok', 'version': '3.2.0'})
+        self.assertEqual(self.client.get('/health').json(), {'status': 'ok', 'version': '3.3.0'})
         file = [('files[]', ('test.pdf', b'bad pdf', 'application/pdf'))]
         self.assertEqual(self.client.post('/read-cf', files=file).status_code, 401)
         with patch.object(ocr, 'API_KEY', ''):
@@ -115,7 +115,7 @@ class F24OcrTest(unittest.TestCase):
 
     def test_text_batch_does_not_run_ocr_and_preserves_page_client_order(self):
         self.text_patch.stop()
-        text = 'CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77\fCODICE FISCALE RSSMRA80A01H501U\nRiferimento:01/10/2026/78\fCODICE FISCALE LHDMMD97T01Z336N\nRiferimento:02/10/2026/79\f'
+        text = 'CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77\nPresentazione Cartacea\fCODICE FISCALE RSSMRA80A01H501U\nRiferimento:01/10/2026/78\nTelematico Entratel\fCODICE FISCALE LHDMMD97T01Z336N\nRiferimento:02/10/2026/79\nPresentazione Cartacea\f'
         with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=text.encode())):
             with patch.object(ocr, 'read_page_ocr_text', side_effect=AssertionError('Unexpected OCR')):
                 result = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b', 'c']), 'application/pdf'))]).json()[0]
@@ -123,6 +123,35 @@ class F24OcrTest(unittest.TestCase):
         self.assertTrue(all(i['success'] and 'pdf_base64' in i for i in result['invoices']))
         self.assertEqual([i['invoice_number'] for i in result['invoices']], ['77', '78', '79'])
         self.assertEqual([i['due_date'] for i in result['invoices']], ['2026-09-30', '2026-10-01', '2026-10-02'])
+        self.assertEqual([i['presentation_type'] for i in result['invoices']], ['cartacea', 'telematico_entratel', 'cartacea'])
+
+    def test_presentation_type_requires_explicit_unambiguous_label(self):
+        self.assertEqual(ocr.extract_presentation_type('Presentazione Cartacea'), 'cartacea')
+        self.assertEqual(ocr.extract_presentation_type('telematico\n ENTRATEL'), 'telematico_entratel')
+        self.assertIsNone(ocr.extract_presentation_type('AUTORIZZO L’ADDEBITO SU C/C'))
+        self.assertIsNone(ocr.extract_presentation_type('Presentazione Cartacea\nTelematico Entratel'))
+        self.assertIsNone(ocr.extract_presentation_type(''))
+
+    def test_type_ocr_fallback_is_page_local_and_conflicting_types_are_not_guessed(self):
+        self.text_patch.stop()
+        prefix = 'CODICE FISCALE RNCSMN92T22I274S\nRiferimento:14/10/2026/77\n'
+        text = prefix + 'Presentazione Cartacea\f' + prefix + '\f' + prefix + 'Presentazione Cartacea\nTelematico Entratel\f'
+        with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=text.encode())):
+            with patch.object(ocr, 'read_page_ocr_text', side_effect=['Telematico Entratel', 'Telematico Entratel']) as read:
+                invoices = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b', 'c']), 'application/pdf'))]).json()[0]['invoices']
+        self.assertEqual([i['presentation_type'] for i in invoices], ['cartacea', 'telematico_entratel', None])
+        self.assertEqual([call.args[1] for call in read.call_args_list], [2, 3])
+        self.assertIn('presentation_warning', invoices[2])
+
+    def test_missing_type_does_not_inherit_preceding_page_type(self):
+        with patch.object(ocr, 'read_page_ocr_text', side_effect=[
+            'CODICE FISCALE RNCSMN92T22I274S\nRiferimento:14/10/2026/77\nTelematico Entratel',
+            'CODICE FISCALE RNCSMN92T22I274S\nRiferimento:14/10/2026/78',
+        ]):
+            invoices = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b']), 'application/pdf'))]).json()[0]['invoices']
+        self.assertEqual(invoices[0]['presentation_type'], 'telematico_entratel')
+        self.assertIsNone(invoices[1]['presentation_type'])
+        self.assertIn('presentation_warning', invoices[1])
 
     def test_reference_parser_uses_footer_and_validates_dates(self):
         self.assertEqual(ocr.extract_reference('periodo di riferimento: 2024\nRiferimento:30/09/2026/77'),
@@ -156,7 +185,7 @@ class F24OcrTest(unittest.TestCase):
 
     def test_missing_reference_does_not_drop_recognized_invoice_or_inherit_previous_date(self):
         self.text_patch.stop()
-        text = 'CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77\fCODICE FISCALE LHDMMD97T01Z336N\f'
+        text = 'CODICE FISCALE LHDMMD97T01Z336N\nRiferimento:30/09/2026/77\nPresentazione Cartacea\fCODICE FISCALE LHDMMD97T01Z336N\f'
         with patch.object(ocr.subprocess, 'run', return_value=SimpleNamespace(stdout=text.encode())):
             with patch.object(ocr, 'read_page_ocr_text', return_value=''):
                 invoices = self.upload([('files[]', ('batch.pdf', pdf_pages(['a', 'b']), 'application/pdf'))]).json()[0]['invoices']
