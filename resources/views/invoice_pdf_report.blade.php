@@ -180,7 +180,7 @@
             </td>
             <td>
                 <div style="font-weight: 600; color: #7f8fa6;">IBAN</div>
-                <div>{{ $clientBankAccount['iban'] }}</div>
+                <div>{{ $paymentMethod === 'MP05' ? ($bankAccount['iban'] ?? '') : ($clientBankAccount['iban'] ?? '') }}</div>
             </td>
             <td>
                 <div style="font-weight: 600; color: #7f8fa6;">DATA SCADENZA</div>

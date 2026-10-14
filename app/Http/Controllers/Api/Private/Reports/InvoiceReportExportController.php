@@ -5,13 +5,13 @@ namespace App\Http\Controllers\Api\Private\Reports;
 use App\Http\Controllers\Controller;
 use App\Models\Client\Client;
 use App\Models\Client\ClientAddress;
-use App\Models\Client\ClientBankAccount;
 use App\Models\Client\ClientPayInstallment;
 use App\Models\Client\ClientPayInstallmentSubData;
 use App\Models\Invoice\Invoice;
 use App\Models\Parameter\ParameterValue;
 use App\Models\Task\Task;
 use App\Services\Reports\ReportService;
+use App\Services\Invoice\InvoicePaymentService;
 use Barryvdh\DomPDF\Facade\Pdf as PDF;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -45,13 +45,6 @@ class InvoiceReportExportController extends Controller
         } elseif ($request->type == 'xml') {
             $data = $this->getInvoiceData($request);
 
-            // Check if client has CAB, ABI and bankName for XML export
-            if (empty($data['clientBankAccount']['cab']) || empty($data['clientBankAccount']['abi']) || empty($data['clientBankAccount']['bankName'])) {
-                return response()->json([
-                    'message' => 'Questo cliente non ha CAB, ABI e nome banca associati'
-                ], 401);
-            }
-
             return $this->generateInvoiceXml($data);
         }
     }
@@ -64,35 +57,7 @@ class InvoiceReportExportController extends Controller
 
         $clientAddressFormatted = ClientAddress::where('client_id', $client->id)->first()?->address ?? "";
 
-        // First try to get main bank account, if not found get any bank account
-        $clientBankAccount = ClientBankAccount::with('bank')->where('client_id', $client->id)->where('is_main', 1)->first();
-
-        if ($clientBankAccount == null) {
-            $clientBankAccount = ClientBankAccount::with('bank')->where('client_id', $client->id)->first();
-        }
-
-        $clientBankAccountFormatted = [];
-
-        if ($clientBankAccount != null) {
-            $clientBankAccountFormatted = [
-                'iban'     => $clientBankAccount->iban ?? "",
-                'abi'      => $clientBankAccount->abi ?? "",
-                'cab'      => $clientBankAccount->cab ?? "",
-                'bankName' => $clientBankAccount->bank?->parameter_value ?? ""
-            ];
-        }
-
         $clientAddressData = ClientAddress::where('client_id', $client->id)->first();
-
-        $paymentMethod = ParameterValue::find($invoice->payment_type_id ?? null);
-
-        $bankAccount = null;
-
-        if ($invoice->bank_account_id) {
-            $bankAccount = ParameterValue::where('id', $invoice->bank_account_id)->first();
-        } else {
-            $bankAccount = ParameterValue::where('parameter_order', 7)->where('is_default', 1)->first();
-        }
 
         return [
             'invoice'              => $invoice,
@@ -100,15 +65,7 @@ class InvoiceReportExportController extends Controller
             ...$document,
             'client'               => $client,
             'clientAddress'        => $clientAddressFormatted,
-            'clientBankAccount'    => $clientBankAccountFormatted,
-            'paymentMethod'        => $paymentMethod->code ?? "",
-            'paymentMethodName'    => $paymentMethod->parameter_value ?? "",
-            'bankAccount'          => [
-                'iban'     => $bankAccount->parameter_value ?? '',
-                'abi'      => $bankAccount->description2 ?? '',
-                'cab'      => $bankAccount->description3 ?? '',
-                'bankName' => $bankAccount->description ?? ''
-            ],
+            ...app(InvoicePaymentService::class)->forDocument($invoice),
         ];
     }
 
@@ -262,6 +219,24 @@ class InvoiceReportExportController extends Controller
     }
 
     public function generateInvoiceXml(array $data)
+    {
+        return DB::transaction(function () use ($data) {
+            $invoice = Invoice::lockForUpdate()->findOrFail($data['invoice']->id);
+            $data['invoice'] = $invoice;
+            $data = array_replace($data, app(InvoicePaymentService::class)->forDocument($invoice));
+
+            // RiBa uses the client's bank; transfers use the invoice's beneficiary account.
+            if ($data['paymentMethod'] === 'MP12' && (empty($data['clientBankAccount']['cab']) || empty($data['clientBankAccount']['abi']) || empty($data['clientBankAccount']['bankName']))) {
+                return response()->json([
+                    'message' => 'Questo cliente non ha CAB, ABI e nome banca associati',
+                ], 401);
+            }
+
+            return $this->renderInvoiceXml($data);
+        });
+    }
+
+    private function renderInvoiceXml(array $data)
     {
         // Function to sanitize text by removing accents and special characters
         $removeAccents = function ($string) {
@@ -623,9 +598,13 @@ class InvoiceReportExportController extends Controller
 
         Storage::disk('local')->put($path, $xmlContent);
 
-        // Update invoice with XML number only if it's new
+        // Persist the exact payment data used by this XML together with its number.
         if (empty($data['invoice']->invoice_xml_number)) {
-            Invoice::where('id', $data['invoice']['id'])->update(['invoice_xml_number' => $invoiceNewNumber]);
+            $data['invoice']->invoice_xml_number = $invoiceNewNumber;
+            $data['invoice']->payment_snapshot = array_intersect_key($data, array_flip([
+                'paymentMethod', 'paymentMethodName', 'bankAccount', 'clientBankAccount',
+            ]));
+            $data['invoice']->save();
         }
 
         return response()->json([

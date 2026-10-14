@@ -8,6 +8,8 @@ use App\Enums\Task\TaskStatus;
 use App\Models\Invoice\Invoice;
 use App\Utils\PaginateCollection;
 use App\Services\Task\TaskService;
+use App\Services\Invoice\InvoicePaymentService;
+use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Facades\DB;
 use App\Enums\Client\ClientCategory;
 use App\Http\Controllers\Controller;
@@ -451,7 +453,18 @@ class InvoiceController extends Controller
         try {
             DB::beginTransaction();
 
-            $invoice = Invoice::find($request->invoiceId);
+            $invoice = Invoice::lockForUpdate()->findOrFail($request->invoiceId);
+
+            if (trim((string) $invoice->invoice_xml_number) !== '') {
+                foreach (['bankAccountId' => 'bank_account_id', 'paymentTypeId' => 'payment_type_id'] as $input => $attribute) {
+                    if ($request->filled($input) && (string) $request->input($input) !== (string) $invoice->$attribute) {
+                        throw ValidationException::withMessages([
+                            $input => 'I dati di pagamento di una fattura con numero XML non possono essere modificati.',
+                        ]);
+                    }
+                }
+                app(InvoicePaymentService::class)->forDocument($invoice);
+            }
 
             $endDate = Carbon::parse($request->endAt);
 
@@ -460,10 +473,14 @@ class InvoiceController extends Controller
             // }
 
             $invoice->end_at = $endDate;
-            $invoice->payment_type_id = $request->paymentTypeId;
+            if ($request->filled('paymentTypeId')) {
+                $invoice->payment_type_id = $request->paymentTypeId;
+            }
             $invoice->discount_type = $request->discountType;
             $invoice->discount_amount = $request->discountAmount;
-            $invoice->bank_account_id = $request->bankAccountId;
+            if ($request->filled('bankAccountId')) {
+                $invoice->bank_account_id = $request->bankAccountId;
+            }
 
             if ($request->filled('startAt')) {
                 $invoice->start_date = Carbon::parse($request->startAt)->format('Y-m-d');
@@ -635,6 +652,12 @@ class InvoiceController extends Controller
             $invoiceNewNumber = null;
 
             DB::transaction(function () use (&$invoiceNewNumber, $invoice) {
+                $invoice = Invoice::lockForUpdate()->findOrFail($invoice->id);
+                if (trim((string) $invoice->invoice_xml_number) !== '') {
+                    app(InvoicePaymentService::class)->forDocument($invoice);
+                    $invoiceNewNumber = $invoice->invoice_xml_number;
+                    return;
+                }
                 // Get the parameter value from parameter_order = 13
                 $parameterValue = \App\Models\Parameter\ParameterValue::where('parameter_order', 13)->first();
                 $parameterNumber = $parameterValue?->parameter_value ?? '1/57';
@@ -663,6 +686,7 @@ class InvoiceController extends Controller
                 }
 
                 // Save the generated number to the invoice
+                $invoice->payment_snapshot = app(InvoicePaymentService::class)->current($invoice);
                 $invoice->invoice_xml_number = $invoiceNewNumber;
                 $invoice->save();
             });

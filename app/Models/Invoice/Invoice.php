@@ -23,6 +23,10 @@ class Invoice extends Model
         'bank_account_id',
     ];
 
+    protected $casts = [
+        'payment_snapshot' => 'array',
+    ];
+
     public static function boot()
     {
         parent::boot();
