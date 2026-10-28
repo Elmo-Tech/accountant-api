@@ -10,6 +10,7 @@ use App\Utils\PaginateCollection;
 use App\Services\Task\TaskService;
 use App\Services\Invoice\InvoicePaymentService;
 use Illuminate\Validation\ValidationException;
+use Illuminate\Validation\Rule;
 use Illuminate\Support\Facades\DB;
 use App\Enums\Client\ClientCategory;
 use App\Http\Controllers\Controller;
@@ -369,7 +370,7 @@ class InvoiceController extends Controller
 
     public function edit(Request $request)
     {
-        $invoice = Invoice::with('invoiceDetails')->find($request->invoiceId);
+        $invoice = Invoice::with('invoiceDetails')->findOrFail($request->invoiceId);
         $invoiceDetailsData = [];
 
         $invoiceableType = "";
@@ -450,6 +451,14 @@ class InvoiceController extends Controller
 
     public function update(Request $request)
     {
+        $request->validate([
+            'invoiceId' => ['required', 'integer'],
+            'bankAccountId' => [
+                'sometimes', 'nullable', 'integer',
+                Rule::exists('parameter_values', 'id')->where('parameter_id', 7)->whereNull('deleted_at'),
+            ],
+        ]);
+
         try {
             DB::beginTransaction();
 
@@ -466,18 +475,18 @@ class InvoiceController extends Controller
                 app(InvoicePaymentService::class)->forDocument($invoice);
             }
 
-            $endDate = Carbon::parse($request->endAt);
-
-            // if ($endDate->format('d-m') === '31-08' || $endDate->format('d-m') === '31-12') {
-            //     $endDate->addDays(10);
-            // }
-
-            $invoice->end_at = $endDate;
+            if ($request->filled('endAt')) {
+                $invoice->end_at = Carbon::parse($request->endAt);
+            }
             if ($request->filled('paymentTypeId')) {
                 $invoice->payment_type_id = $request->paymentTypeId;
             }
-            $invoice->discount_type = $request->discountType;
-            $invoice->discount_amount = $request->discountAmount;
+            if ($request->has('discountType')) {
+                $invoice->discount_type = $request->discountType;
+            }
+            if ($request->has('discountAmount')) {
+                $invoice->discount_amount = $request->discountAmount;
+            }
             if ($request->filled('bankAccountId')) {
                 $invoice->bank_account_id = $request->bankAccountId;
             }

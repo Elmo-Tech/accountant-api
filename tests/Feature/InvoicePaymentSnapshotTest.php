@@ -103,6 +103,41 @@ class InvoicePaymentSnapshotTest extends TestCase
         $this->assertSame(22, $invoice->fresh()->bank_account_id);
     }
 
+    public function test_bank_update_round_trips_through_edit_without_changing_other_fields(): void
+    {
+        $invoice = $this->invoice(1896, [
+            'bank_account_id' => 22, 'start_date' => '2026-10-19', 'end_at' => '2026-11-19',
+            'discount_type' => 1, 'discount_amount' => 50,
+        ]);
+        $this->getJson('/api/v1/invoices/edit?invoiceId=1896')->assertOk()
+            ->assertJsonPath('data.bankAccountId', 22);
+        $this->putJson('/api/v1/invoices/update', ['invoiceId' => 1896, 'bankAccountId' => 114])->assertOk();
+        $this->getJson('/api/v1/invoices/edit?invoiceId=1896')->assertOk()
+            ->assertJsonPath('data.bankAccountId', 114)
+            ->assertJsonPath('data.startDate', '2026-10-19')
+            ->assertJsonPath('data.endAt', '2026-11-19')
+            ->assertJsonPath('data.paymentTypeId', 20)
+            ->assertJsonPath('data.discountType', 1);
+        $this->assertSame(50.0, (float) $invoice->fresh()->discount_amount);
+        foreach ([[], ['bankAccountId' => null], ['bankAccountId' => '']] as $extra) {
+            $this->putJson('/api/v1/invoices/update', array_merge(['invoiceId' => 1896], $extra))->assertOk();
+            $this->getJson('/api/v1/invoices/edit?invoiceId=1896')->assertOk()
+                ->assertJsonPath('data.bankAccountId', 114);
+        }
+        $this->assertNull($invoice->fresh()->payment_snapshot);
+    }
+
+    public function test_bank_update_rejects_invalid_deleted_and_non_iban_parameter_ids(): void
+    {
+        $invoice = $this->invoice();
+        DB::table('parameter_values')->where('id', 22)->update(['deleted_at' => '2026-10-29']);
+        foreach ([0, 999, 20, 81, 22, '114##0'] as $invalid) {
+            $this->putJson('/api/v1/invoices/update', ['invoiceId' => 1, 'bankAccountId' => $invalid])
+                ->assertUnprocessable()->assertJsonValidationErrors('bankAccountId');
+            $this->assertSame(114, $invoice->fresh()->bank_account_id);
+        }
+    }
+
     public function test_number_button_freezes_payment_for_pdf_and_xml_and_is_repeatable(): void
     {
         $invoice = $this->invoice();
